@@ -89,6 +89,7 @@ defmodule DirectoryPlaylistLoader do
       {:ok, entries} ->
         channels =
           entries
+          |> Enum.reject(&String.starts_with?(&1, "."))
           |> Enum.map(&Path.join(root_dir, &1))
           |> Enum.filter(&File.dir?/1)
           |> Enum.sort()
@@ -129,6 +130,7 @@ defmodule DirectoryPlaylistLoader do
         case File.ls(path) do
           {:ok, entries} ->
             entries
+            |> Enum.reject(&String.starts_with?(&1, "."))
             |> Enum.map(&Path.join(path, &1))
             |> Enum.flat_map(&list_files_recursive/1)
 
