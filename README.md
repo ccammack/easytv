@@ -6,11 +6,25 @@ I run it on a Raspberry Pi 4B v1.2 4GB with [FLIRC](https://flirc.tv/) and an EZ
 
 It accepts a list of *media root* directories passed on the command line and treats each child directory below a *media root* as a media *channel*.
 
-The media files in each *channel* subtree are cached into a looping playlist. Pass the `--scan` command line option to rebuild the *channel* playlist cache.
+For example, passing this `/mnt/media` as a media root will treat its children as *channels* called `Movies (1940s)` and `Scrapbook`.
+Hidden files and directories starting with `.` will be skipped, so `.inbox` will not act as a *channel*.
+The media files in each *channel* subtree, at any depth, will be played as a long looping playlist.
 
-Switching *channels* saves the current playhead position and later restores it when that *channel* is resumed.
+``` sh
+/mnt/media
+├── .inbox
+├── Movies (1940s)
+│   ├── Casablanca (1942)
+│   └── The-Maltese-Falcon (1941)
+├── Scrapbook
+│   ├── iphone
+│   ├── 8mm family videos
+│   └── digital frame media
+```
 
-Pausing playback saves the current playhead position and turns the screen off using `xset`.
+Switching *channels* will save the current playhead position so it can be restored later when the *channel* is resumed.
+
+The *toggle playback* command will save the current playhead position and send the poweroff signal to the connected TV over `hdmi-cec`.
 
 # Installation
 
@@ -24,12 +38,28 @@ $ uname -a
 Linux player 6.12.75+rpt-rpi-v8 #1 SMP PREEMPT Debian 1:6.12.75-1+rpt1 (2026-03-11) aarch64 GNU/Linux
 ```
 
-Configure the user to log into the console automatically.
+Configure the user to log into the console automatically:
 
 ``` sh
 $ sudo raspi-config
 
 # System Options -> Auto Login -> ...automatically log in to the console? -> Yes
+```
+
+Lock the Pi's output to 1080p:
+
+``` sh
+$ sudo nano /boot/firmware/config.txt
+[...]
+
+$ sudo cat /boot/firmware/config.txt
+[...]
+[all]
+enable_uart=1
+
+hdmi_force_hotplug=1
+hdmi_group=1
+hdmi_mode=16
 ```
 
 Install prerequisites:
@@ -71,16 +101,19 @@ The `.xinit` file runs `easytv` with one or more *media root* directories:
 $ cat .xinitrc
 #!/bin/sh
 
-exec $HOME/easytv.exs /mnt/media/ 2>&1 | systemd-cat -t easytv
+# xterm &
+exec systemd-cat -t easytv "$HOME"/easytv.exs --scan /mnt/media/ 2>&1
 ```
 
-In this `.xinit`, */mnt/media* is a mount point for a [TrueNAS](https://www.truenas.com/) SMB share, which is mounted as read-only using a root-owned credentials file:
+In my `.xinitrc`, */mnt/media* is a mount point for a [TrueNAS](https://www.truenas.com/) SMB share, which I mounted as read-only using a root-owned credentials file:
 
 ``` sh
 $ sudo apt install -y cifs-utils
 $ sudo mkdir -p /mnt/media
 
-$ sudo vi /root/.smbcredentials
+$ sudo nano /root/.smbcredentials
+[...]
+
 $ sudo cat /root/.smbcredentials
 username=USERNAME
 password=PASSWORD
@@ -88,7 +121,9 @@ domain=WORKGROUP
 
 $ sudo chmod 600 /root/.smbcredentials
 
-$ sudo vi /etc/fstab
+$ sudo nano /etc/fstab
+[...]
+
 $ sudo cat /etc/fstab
 proc            /proc           proc    defaults          0       0
 PARTUUID=4ea15ea7-01  /boot/firmware  vfat    defaults          0       2
@@ -123,37 +158,43 @@ touch: cannot touch '/mnt/media/test': Read-only file system
 | PageUp   | Next channel                     |
 | PageDown | Prev channel                     |
 
-# Development
+# Development Over `ssh`
 
-To run the script manually over `ssh`, add a line to `.xinitrc` to start an X11 app like `xterm` instead of `easytv` on login. This will start X and assign values to `DISPLAY` and `XAUTHORITY`:
+The user configuration described here makes it difficult to start and stop the application manually for testing.
+
+To work around this, temporarily change `.xinitrc` to run `exec xterm` rather than `exec easytv`.
 
 ``` sh
 $ cat .xinitrc
 #!/bin/sh
 
-exec xterm -fa Monospace -fs 12
-# exec $HOME/easytv.exs /mnt/media/ 2>&1 | systemd-cat -t easytv
+exec xterm
+# exec systemd-cat -t easytv "$HOME"/easytv.exs --scan /mnt/media/ 2>&1
+
+$ sudo reboot
 ```
 
-Specify `DISPLAY` and `XAUTHORITY` when running over `ssh`:
+After doing this, it will be possible to run and `pkill` the application as needed for development and testing.
 
-```
+``` sh
 $ DISPLAY=:0 XAUTHORITY=$HOME/.Xauthority ./easytv.exs --scan /mnt/media
+[...]
+
+$ pkill easytv
+$ pkill mpv
 ```
+
+# Application State
+
+The application's media cache and playback state is stored in `~.local/state/easytv`. Delete those files to restart everything from scratch.
+
+# Logs
 
 Use `journalctl` to view the logs:
 
-```
+``` sh
 $ journalctl -t easytv -f
 $ journalctl -t easytv --since "1 hour ago"
-```
-
-Stop a running instance and delete the current state files to rescan and replay media from the beginning:
-
-```
-$ pkill easytv
-$ pkill mpv
-$ rm -rf .local/state/easytv/
 ```
 
 # References

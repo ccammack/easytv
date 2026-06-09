@@ -1,4 +1,4 @@
 #!/bin/sh
 
-#exec xterm -fa Monospace -fs 12
-exec $HOME/easytv.exs /mnt/media/ 2>&1 | systemd-cat -t easytv
+# exec xterm
+exec systemd-cat -t easytv "$HOME"/easytv.exs --scan /mnt/media/ 2>&1
