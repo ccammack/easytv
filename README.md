@@ -55,6 +55,7 @@ $ sudo nano /boot/firmware/config.txt
 
 $ sudo cat /boot/firmware/config.txt
 [...]
+
 [all]
 enable_uart=1
 
@@ -67,7 +68,7 @@ Install prerequisites:
 
 ``` sh
 $ sudo apt update
-$ sudo apt install -y elixir x11-xserver-utils xterm mpv aosd_cat libvips-tools
+$ sudo apt install -y elixir x11-xserver-utils xterm mpv aosd_cat libvips-tools cec-utils
 ```
 
 Download `bash_profile`, `easytv.exs`, and `.xinitrc` from this repo:

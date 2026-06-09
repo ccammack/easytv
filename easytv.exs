@@ -1392,6 +1392,135 @@ defmodule Volume do
   end
 end
 
+defmodule HdmiCec do
+  require Logger
+
+  @tv_logical_address "0"
+  @cec_client_args ["-s", "-d", "1"]
+
+  def available? do
+    not is_nil(System.find_executable("cec-client"))
+  end
+
+  def probe do
+    cond do
+      not available?() ->
+        Logger.info("hdmi_cec probe: cec-client not installed, using dpms fallback")
+        {:ok, :dpms}
+
+      true ->
+        case scan() do
+          {:ok, output} ->
+            if cec_scan_detects_device?(output) do
+              Logger.info("hdmi_cec probe: detected responsive cec device(s), using hdmi_cec backend")
+              {:ok, :hdmi_cec}
+            else
+              Logger.info("hdmi_cec probe: no responsive cec device detected, using dpms fallback")
+              {:ok, :dpms}
+            end
+
+          {:error, reason} ->
+            Logger.info("hdmi_cec probe failed #{inspect(reason)}, using dpms fallback")
+            {:ok, :dpms}
+        end
+    end
+  end
+
+  def power_on_tv do
+    command("on #{@tv_logical_address}")
+  end
+
+  def standby_tv do
+    command("standby #{@tv_logical_address}")
+  end
+
+  def active_source do
+    command("as")
+  end
+
+  def power_on_and_activate do
+    with {:ok, _} <- power_on_tv() do
+      Logger.info("hdmi_cec power_on_and_activate: tv power on sent, waiting before active source")
+      Process.sleep(1500)
+      try_active_source(1)
+    end
+  end
+
+  def scan do
+    command("scan")
+  end
+
+  def command(cmd) when is_binary(cmd) do
+    case System.find_executable("cec-client") do
+      nil ->
+        {:error, :cec_client_not_found}
+
+      cec_client ->
+        shell_cmd =
+          ~s{printf '%s\n' "#{escape_for_double_quotes(cmd)}" | "#{cec_client}" #{Enum.join(@cec_client_args, " ")}}
+
+        case System.cmd("sh", ["-lc", shell_cmd], stderr_to_stdout: true) do
+          {output, 0} ->
+            {:ok, String.trim(output)}
+
+          {output, status} ->
+            {:error, {:cec_command_failed, cmd, status, String.trim(output)}}
+        end
+    end
+  end
+
+  defp try_active_source(attempt) do
+    Logger.info("hdmi_cec active_source attempt=#{attempt}")
+
+    case active_source() do
+      {:ok, output} = ok ->
+        Logger.info("hdmi_cec active_source attempt=#{attempt} succeeded output=#{inspect(output)}")
+        ok
+
+      {:error, reason} ->
+        Logger.error("hdmi_cec active_source attempt=#{attempt} failed reason=#{inspect(reason)}; retrying forever")
+        Process.sleep(1500)
+        try_active_source(attempt + 1)
+    end
+  end
+
+  defp cec_scan_detects_device?(output) when is_binary(output) do
+    text = String.downcase(output)
+
+    cond do
+      String.contains?(text, "device #") -> true
+      String.contains?(text, "address:") -> true
+      String.contains?(text, "vendor:") -> true
+      String.contains?(text, "osd string:") -> true
+      true -> false
+    end
+  end
+
+  defp escape_for_double_quotes(value) do
+    value
+    |> String.replace("\\", "\\\\")
+    |> String.replace("\"", "\\\"")
+  end
+end
+
+defmodule DisplayDpms do
+  def force(mode) when mode in [:off, :on] do
+    case System.find_executable("xset") do
+      nil ->
+        {:error, :xset_not_found}
+
+      xset ->
+        case System.cmd(xset, ["dpms", "force", Atom.to_string(mode)], stderr_to_stdout: true) do
+          {output, 0} ->
+            {:ok, String.trim(output)}
+
+          {output, status} ->
+            {:error, {:xset_failed, status, String.trim(output)}}
+        end
+    end
+  end
+end
+
 defmodule App do
   use GenServer
   require Logger
@@ -1442,6 +1571,7 @@ defmodule App do
           preview_timer: nil,
           preview_active?: false,
           screen_off?: false,
+          display_backend: :dpms,
           channel_state: saved_channel_state,
           runtime_sup: nil,
           image_display_timer: nil,
@@ -1466,11 +1596,34 @@ defmodule App do
     Process.flag(:trap_exit, true)
     state = if Keyword.keyword?(state), do: Enum.into(state, %{}), else: state
     {:ok, runtime_sup} = RuntimeSupervisor.start_link(receiver: self())
+    {:ok, display_backend} = HdmiCec.probe()
 
     state =
       state
       |> Map.put(:runtime_sup, runtime_sup)
+      |> Map.put(:screen_off?, false)
+      |> Map.put(:display_backend, display_backend)
       |> ensure_all_channel_state_entries()
+
+    case display_backend do
+      :hdmi_cec ->
+        case HdmiCec.power_on_and_activate() do
+          {:ok, _} ->
+            Logger.info("startup display backend=hdmi_cec; tv on and pi active source")
+
+          {:error, reason} ->
+            Logger.error("startup hdmi_cec activation failed #{inspect(reason)}")
+        end
+
+      :dpms ->
+        case DisplayDpms.force(:on) do
+          {:ok, _} ->
+            Logger.info("startup display backend=dpms; screen on")
+
+          {:error, reason} ->
+            Logger.error("startup dpms activation failed #{inspect(reason)}")
+        end
+    end
 
     case state.current_channel do
       nil ->
@@ -1843,7 +1996,13 @@ defmodule App do
 
   defp turn_screen_off(state) do
     Logger.info(
-      "turn_screen_off: current_channel=#{inspect(state.current_channel && state.current_channel.label)} current_file_index=#{inspect(state.current_file_index)} current_player=#{inspect(state.current_player)} preview_active?=#{inspect(state.preview_active?)} next_prepare_ref=#{inspect(state.next_prepare_ref)} next_prepared?=#{not is_nil(state.next_prepared)}"
+      "turn_screen_off: backend=#{inspect(state.display_backend)} " <>
+        "current_channel=#{inspect(state.current_channel && state.current_channel.label)} " <>
+        "current_file_index=#{inspect(state.current_file_index)} " <>
+        "current_player=#{inspect(state.current_player)} " <>
+        "preview_active?=#{inspect(state.preview_active?)} " <>
+        "next_prepare_ref=#{inspect(state.next_prepare_ref)} " <>
+        "next_prepared?=#{inspect(not is_nil(state.next_prepared))}"
     )
 
     state =
@@ -1855,13 +2014,39 @@ defmodule App do
 
     Process.sleep(150)
 
-    case dpms_force("off") do
-      :ok ->
-        Logger.info("Screen off")
+    state =
+      case state.display_backend do
+        :hdmi_cec ->
+          case HdmiCec.standby_tv() do
+            {:ok, _} ->
+              Logger.info("tv standby via hdmi_cec")
+              state
 
-      {:error, reason} ->
-        Logger.error("failed to turn screen off: #{inspect(reason)}")
-    end
+            {:error, reason} ->
+              Logger.error("hdmi_cec standby failed #{inspect(reason)}; falling back to dpms")
+
+              case DisplayDpms.force(:off) do
+                {:ok, _} ->
+                  Logger.info("screen off via dpms fallback")
+
+                {:error, dpms_reason} ->
+                  Logger.error("dpms fallback off failed #{inspect(dpms_reason)}")
+              end
+
+              Map.put(state, :display_backend, :dpms)
+          end
+
+        :dpms ->
+          case DisplayDpms.force(:off) do
+            {:ok, _} ->
+              Logger.info("screen off via dpms")
+
+            {:error, reason} ->
+              Logger.error("failed to turn screen off via dpms #{inspect(reason)}")
+          end
+
+          state
+      end
 
     Map.put(state, :screen_off?, true)
   end
@@ -1873,31 +2058,47 @@ defmodule App do
     state |> Map.put(:preview_channel, nil) |> Map.put(:preview_timer, nil) |> Map.put(:preview_active?, false)
   end
 
-  defp dpms_force(mode) when mode in ["off", "on"] do
-    case System.find_executable("xset") do
-      nil ->
-        {:error, :xset_not_found}
-
-      xset ->
-        case System.cmd(xset, ["dpms", "force", mode], stderr_to_stdout: true) do
-          {_output, 0} -> :ok
-          {output, status} -> {:error, {:xset_failed, status, String.trim(output)}}
-        end
-    end
-  end
-
   defp wake_screen(state) do
     Logger.info(
-      "wake_screen: current_channel=#{inspect(state.current_channel && state.current_channel.label)} saved_current_channel_id=#{inspect(state.current_channel_id)} screen_off?=#{inspect(state.screen_off?)}"
+      "wake_screen: backend=#{inspect(state.display_backend)} " <>
+        "current_channel=#{inspect(state.current_channel && state.current_channel.label)} " <>
+        "savedcurrentchannelid=#{inspect(state.current_channel_id)} " <>
+        "screen_off?=#{inspect(state.screen_off?)}"
     )
 
-    case dpms_force("on") do
-      :ok ->
-        Logger.info("Screen on")
+    state =
+      case state.display_backend do
+        :hdmi_cec ->
+          case HdmiCec.power_on_and_activate() do
+            {:ok, _} ->
+              Logger.info("tv powered on and pi restored as active source via hdmi_cec")
+              state
 
-      {:error, reason} ->
-        Logger.error("failed to turn screen on: #{inspect(reason)}")
-    end
+            {:error, reason} ->
+              Logger.error("hdmi_cec wake failed #{inspect(reason)}; falling back to dpms")
+
+              case DisplayDpms.force(:on) do
+                {:ok, _} ->
+                  Logger.info("screen on via dpms fallback")
+
+                {:error, dpms_reason} ->
+                  Logger.error("dpms fallback on failed #{inspect(dpms_reason)}")
+              end
+
+              Map.put(state, :display_backend, :dpms)
+          end
+
+        :dpms ->
+          case DisplayDpms.force(:on) do
+            {:ok, _} ->
+              Logger.info("screen on via dpms")
+
+            {:error, reason} ->
+              Logger.error("failed to turn screen on via dpms #{inspect(reason)}")
+          end
+
+          state
+      end
 
     Process.sleep(@screen_wake_delay_ms)
 
@@ -1918,7 +2119,8 @@ defmodule App do
         {file_index, offset_seconds, state} = load_or_initialize_channel_position(state, channel)
 
         Logger.info(
-          "wake_screen: resuming channel=#{channel.label} requested_file_index=#{inspect(file_index)} offset_seconds=#{inspect(offset_seconds)}"
+          "wake_screen: resuming channel=#{channel.label} " <>
+            "requested_file_index=#{inspect(file_index)} offset_seconds=#{inspect(offset_seconds)}"
         )
 
         case play_channel_item(state, channel, file_index, offset_seconds) do
@@ -1926,7 +2128,9 @@ defmodule App do
             actual_path = Enum.at(channel.media, actual_file_index)
 
             Logger.info(
-              "wake_screen: resumed channel=#{channel.label} actual_file_index=#{actual_file_index} actual_path=#{inspect(actual_path)} offset_seconds=#{inspect(offset_seconds)}"
+              "wake_screen: resumed channel=#{channel.label} " <>
+                "actual_file_index=#{actual_file_index} actual_path=#{inspect(actual_path)} " <>
+                "offset_seconds=#{inspect(offset_seconds)}"
             )
 
             Osd.show(channel.name)
@@ -2236,8 +2440,8 @@ defmodule App do
     with {:ok, playerpid} <- MpvPlayer.start_link(parent: self(), file: prepared.play_path, start_pos: startpos) do
       updated_channel_state =
         Map.put(state.channel_state, channel_id(channel), %{
-          filepath: actual_path,
-          offsetseconds: 0
+          file_path: actual_path,
+          offset_seconds: 0
         })
 
       new_state =
