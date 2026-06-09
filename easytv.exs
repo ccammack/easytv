@@ -1459,14 +1459,30 @@ defmodule HdmiCec do
         shell_cmd =
           ~s{printf '%s\n' "#{escape_for_double_quotes(cmd)}" | "#{cec_client}" #{Enum.join(@cec_client_args, " ")}}
 
-        case System.cmd("sh", ["-lc", shell_cmd], stderr_to_stdout: true) do
-          {output, 0} ->
-            {:ok, String.trim(output)}
+      case System.cmd("sh", ["-lc", shell_cmd], stderr_to_stdout: true) do
+        {output, 0} ->
+          trimmed = String.trim(output)
 
-          {output, status} ->
-            {:error, {:cec_command_failed, cmd, status, String.trim(output)}}
-        end
+          if cec_output_has_error?(trimmed) do
+            {:error, {:cec_command_reported_error, cmd, trimmed}}
+          else
+            {:ok, trimmed}
+          end
+
+        {output, status} ->
+          {:error, {:cec_command_failed, cmd, status, String.trim(output)}}
+      end
     end
+  end
+
+  defp cec_output_has_error?(output) when is_binary(output) do
+    text = String.downcase(output)
+
+    String.contains?(text, "cec_transmit failed") or
+      String.contains?(text, "ioctl cec_transmit failed") or
+      String.contains?(text, "errno=64") or
+      String.contains?(text, "failed to") or
+      String.contains?(text, "connection closed")
   end
 
   defp try_active_source(attempt) do
