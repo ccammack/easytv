@@ -6,9 +6,8 @@ I run it on a Raspberry Pi 4B v1.2 4GB with [FLIRC](https://flirc.tv/) and an EZ
 
 It accepts a list of *media root* directories passed on the command line and treats each child directory below a *media root* as a media *channel*.
 
-For example, passing this `/mnt/media` as a media root will treat its children as *channels* called `Movies (1940s)` and `Scrapbook`.
+For example, passing `/mnt/media` as a *media root* here will treat its children as *channels* called `Movies (1940s)` and `Scrapbook`.
 Hidden files and directories starting with `.` will be skipped, so `.inbox` will not act as a *channel*.
-The media files in each *channel* subtree, at any depth, will be played as a long looping playlist.
 
 ``` sh
 /mnt/media
@@ -22,9 +21,11 @@ The media files in each *channel* subtree, at any depth, will be played as a lon
 │   └── digital frame media
 ```
 
+The media files in each *channel* subtree, at any depth, will be played as a long looping playlist.
+
 Switching *channels* will save the current playhead position so it can be restored later when the *channel* is resumed.
 
-The *toggle playback* command will save the current playhead position and send the poweroff signal to the connected TV over `hdmi-cec`.
+The *toggle playback* command will save the current playhead position and send the `HDMI-CEC` poweroff signal to the connected TV. I cover the IR sensor on the TV to allow the Pi to handle it.
 
 # Installation
 
@@ -101,7 +102,7 @@ The `.xinit` file runs `easytv` with one or more *media root* directories:
 $ cat .xinitrc
 #!/bin/sh
 
-# xterm &
+# exec xterm
 exec systemd-cat -t easytv "$HOME"/easytv.exs --scan /mnt/media/ 2>&1
 ```
 
@@ -186,7 +187,7 @@ $ pkill mpv
 
 # Application State
 
-The application's media cache and playback state is stored in `~.local/state/easytv`. Delete those files to restart everything from scratch.
+The application's media cache and playback state are stored in `~.local/state/easytv`. Delete those files to restart everything from scratch.
 
 # Logs
 
