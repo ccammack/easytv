@@ -3,6 +3,15 @@ set -u
 
 pidfile="/tmp/easytv-osd.pid"
 
+say() {
+  printf '%s\n' "$*"
+}
+
+die() {
+  printf '%s\n' "$*" >&2
+  exit 1
+}
+
 stop_managed_process() {
   if [ ! -f "$pidfile" ]; then
     return 0
@@ -11,6 +20,7 @@ stop_managed_process() {
   pid="$(cat "$pidfile" 2>/dev/null || true)"
 
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    say "stopping existing osd pid: $pid"
     pkill -TERM -P "$pid" 2>/dev/null || true
     kill -TERM "$pid" 2>/dev/null || true
     sleep 0.02
@@ -23,15 +33,17 @@ stop_managed_process() {
 
 aosd_cat="$(command -v aosd_cat || true)"
 if [ -z "$aosd_cat" ]; then
-  echo "could not find executable: aosd_cat" >&2
-  exit 1
+  die "could not find executable: aosd_cat"
 fi
 
 stop_managed_process
 
 if [ "$#" -eq 0 ]; then
+  say "clear osd"
   exit 0
 fi
+
+say "show osd: $1"
 
 exec "$aosd_cat" \
   --position 0 \
@@ -48,4 +60,5 @@ exec "$aosd_cat" \
   --lines 1 <<< "$1" >/dev/null 2>&1 &
 
 echo "$!" > "$pidfile"
+say "started osd pid: $!"
 exit 0

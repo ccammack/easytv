@@ -1005,302 +1005,52 @@ defmodule RuntimeSupervisor do
   end
 end
 
-defmodule Osd do
+defmodule ScriptRunner do
   require Logger
 
-  def show(text) when is_binary(text) do
-    run_osd_script([text])
-  end
-
-  def clear do
-    run_osd_script([])
-  end
-
-  defp osd_script_path do
-    Path.join(Path.dirname(Path.expand(__ENV__.file)), "easytv-osd.sh")
-  end
-
-  defp run_osd_script(args) do
-    script = osd_script_path()
+  def run(script_name, args) when is_binary(script_name) and is_list(args) do
+    script = Path.join(Path.dirname(Path.expand(__ENV__.file)), script_name)
 
     case File.regular?(script) do
       true ->
         case System.cmd(script, args, stderr_to_stdout: true) do
           {output, 0} ->
-            trimmed = String.trim(output)
-            if trimmed != "", do: Logger.debug("osd script output #{inspect(trimmed)}")
+            log_output(script_name, output, :debug)
             :ok
 
           {output, status} ->
-            {:error, {:script_failed, status, String.trim(output)}}
+            log_output(script_name, output, :error)
+            {:error, {:script_failed, script_name, status, String.trim(output)}}
         end
 
       false ->
         {:error, {:script_missing, script}}
     end
   end
+
+  defp log_output(script_name, output, level) do
+    trimmed = String.trim(output)
+
+    if trimmed != "" do
+      Logger.log(level, "#{script_name}: #{trimmed}")
+    end
+  end
+end
+
+defmodule Osd do
+  def show(text) when is_binary(text) do
+    ScriptRunner.run("easytv-osd.sh", [text])
+  end
+
+  def clear do
+    ScriptRunner.run("easytv-osd.sh", [])
+  end
 end
 
 defmodule Volume do
-  @default_step 3
-
-  @type volume_info :: %{
-          percent: non_neg_integer(),
-          muted: boolean(),
-          backend: atom(),
-          control: String.t() | nil
-        }
-
-  def current do
-    backend().current()
-  end
-
-  def current_text do
-    case current() do
-      {:ok, %{percent: percent, muted: true}} ->
-        {:ok, "Volume #{percent}% (muted)"}
-
-      {:ok, %{percent: percent}} ->
-        {:ok, "Volume #{percent}%"}
-
-      error ->
-        error
-    end
-  end
-
-  def set_percent(percent) when is_integer(percent) and percent >= 0 do
-    backend().set_percent(percent)
-  end
-
-  def increase(step \\ @default_step) when is_integer(step) and step >= 0 do
-    backend().increase(step)
-  end
-
-  def decrease(step \\ @default_step) when is_integer(step) and step >= 0 do
-    backend().decrease(step)
-  end
-
-  def mute do
-    backend().mute()
-  end
-
-  def unmute do
-    backend().unmute()
-  end
-
-  def toggle_mute do
-    backend().toggle_mute()
-  end
-
-  def set_and_get_text(percent) do
-    with :ok <- set_percent(percent),
-         {:ok, text} <- current_text() do
-      {:ok, text}
-    end
-  end
-
-  def increase_and_get_text(step \\ @default_step) do
-    with :ok <- increase(step),
-         {:ok, text} <- current_text() do
-      {:ok, text}
-    end
-  end
-
-  def decrease_and_get_text(step \\ @default_step) do
-    with :ok <- decrease(step),
-         {:ok, text} <- current_text() do
-      {:ok, text}
-    end
-  end
-
-  def mute_and_get_text do
-    with :ok <- mute(),
-         {:ok, text} <- current_text() do
-      {:ok, text}
-    end
-  end
-
-  def unmute_and_get_text do
-    with :ok <- unmute(),
-         {:ok, text} <- current_text() do
-      {:ok, text}
-    end
-  end
-
-  def toggle_mute_and_get_text do
-    with :ok <- toggle_mute(),
-         {:ok, text} <- current_text() do
-      {:ok, text}
-    end
-  end
-
-  defp backend do
-    cond do
-      System.find_executable("amixer") ->
-        Volume.Backend.Amixer
-
-      true ->
-        Volume.Backend.None
-    end
-  end
-
-  defmodule Backend.None do
-    def current, do: {:error, :no_volume_backend}
-    def set_percent(_), do: {:error, :no_volume_backend}
-    def increase(_ \\ 0), do: {:error, :no_volume_backend}
-    def decrease(_ \\ 0), do: {:error, :no_volume_backend}
-    def mute, do: {:error, :no_volume_backend}
-    def unmute, do: {:error, :no_volume_backend}
-    def toggle_mute, do: {:error, :no_volume_backend}
-  end
-
-  defmodule Backend.Amixer do
-    require Logger
-
-    @step_default 5
-
-    def current do
-      with {:ok, control} <- control(),
-           {:ok, output} <- amixer(["sget", control]),
-           {:ok, percent, muted} <- parse_current_output(output) do
-        {:ok,
-         %{
-           percent: percent,
-           muted: muted,
-           backend: :amixer,
-           control: control
-         }}
-      end
-    end
-
-    def set_percent(percent) when is_integer(percent) and percent >= 0 do
-      with {:ok, control} <- control(),
-           :ok <- set_absolute(control, percent) do
-        :ok
-      end
-    end
-
-    def increase(step \\ @step_default) when is_integer(step) and step >= 0 do
-      bump(step)
-    end
-
-    def decrease(step \\ @step_default) when is_integer(step) and step >= 0 do
-      bump(-step)
-    end
-
-    def mute do
-      with {:ok, control} <- control(),
-           {:ok, _} <- amixer(["sset", control, "mute"]) do
-        :ok
-      end
-    end
-
-    def unmute do
-      with {:ok, control} <- control(),
-           {:ok, _} <- amixer(["sset", control, "unmute"]) do
-        :ok
-      end
-    end
-
-    def toggle_mute do
-      with {:ok, control} <- control(),
-           {:ok, _} <- amixer(["sset", control, "toggle"]) do
-        :ok
-      end
-    end
-
-    defp bump(delta) do
-      with {:ok, %{percent: current, control: control}} <- current() do
-        target = clamp(current + delta, 0, 100)
-        Logger.debug("volume bump backend=amixer control=#{inspect(control)} #{current} -> #{target}")
-        set_absolute(control, target)
-      end
-    end
-
-    defp set_absolute(control, percent) do
-      percent = clamp(percent, 0, 100)
-
-      case amixer(["sset", control, "#{percent}%"]) do
-        {:ok, _} ->
-          :ok
-
-        {:error, _} = error ->
-          error
-      end
-    end
-
-    defp control do
-      controls = discover_controls()
-
-      preferred =
-        Enum.find(controls, fn c ->
-          String.contains?(c, "Master") or
-            String.contains?(c, "PCM") or
-            String.contains?(c, "Headphone") or
-            String.contains?(c, "Speaker") or
-            String.contains?(c, "Playback")
-        end)
-
-      case preferred || List.first(controls) do
-        nil ->
-          {:error, :no_amixer_control}
-
-        control ->
-          {:ok, control}
-      end
-    end
-
-    defp discover_controls do
-      case amixer(["scontrols"]) do
-        {:ok, output} ->
-          output
-          |> String.split("\n", trim: true)
-          |> Enum.map(
-            &Regex.run(~r/Simple mixer control '([^']+)'/, &1, capture: :all_but_first)
-          )
-          |> Enum.reject(&is_nil/1)
-          |> Enum.map(&hd/1)
-
-        {:error, _} ->
-          []
-      end
-    end
-
-    defp parse_current_output(output) do
-      percent =
-        case Regex.scan(~r/\[([0-9]{1,3})%\]/, output, capture: :all_but_first) do
-          [] ->
-            nil
-
-          matches ->
-            matches
-            |> List.last()
-            |> hd()
-            |> String.to_integer()
-        end
-
-      muted? =
-        String.contains?(output, "[off]") and not String.contains?(output, "[on]")
-
-      if is_integer(percent) do
-        {:ok, percent, muted?}
-      else
-        {:error, {:amixer_parse_failed, output}}
-      end
-    end
-
-    defp amixer(args) do
-      case System.cmd("amixer", args, stderr_to_stdout: true) do
-        {output, 0} ->
-          {:ok, output}
-
-        {output, status} ->
-          {:error, {:amixer_failed, status, args, output}}
-      end
-    end
-
-    defp clamp(v, lo, hi), do: min(max(v, lo), hi)
-  end
+  def toggle_mute, do: ScriptRunner.run("easytv-volume.sh", [])
+  def increase, do: ScriptRunner.run("easytv-volume.sh", ["+"])
+  def decrease, do: ScriptRunner.run("easytv-volume.sh", ["-"])
 end
 
 defmodule HdmiCec do
@@ -1599,32 +1349,32 @@ defmodule App do
 
           {:ev_key, :key_m, 1}, state ->
             Logger.info("M -> toggle mute")
-            show_volume_result(Volume.toggle_mute_and_get_text())
+            _ = Volume.toggle_mute()
             state
 
           {:ev_key, :key_minus, 1}, state ->
             Logger.info("- -> volume down")
-            show_volume_result(Volume.decrease_and_get_text())
+            _ = Volume.decrease()
             state
 
           {:ev_key, :key_kpminus, 1}, state ->
             Logger.info("Numpad - -> volume down")
-            show_volume_result(Volume.decrease_and_get_text())
+            _ = Volume.decrease()
             state
 
           {:ev_key, :key_equal, 1}, state ->
             Logger.info("= -> volume up")
-            show_volume_result(Volume.increase_and_get_text())
+            _ = Volume.increase()
             state
 
           {:ev_key, :key_plus, 1}, state ->
             Logger.info("+ -> volume up")
-            show_volume_result(Volume.increase_and_get_text())
+            _ = Volume.increase()
             state
 
           {:ev_key, :key_kpplus, 1}, state ->
             Logger.info("Numpad + -> volume up")
-            show_volume_result(Volume.increase_and_get_text())
+            _ = Volume.increase()
             state
 
           _, state ->
@@ -1843,15 +1593,6 @@ defmodule App do
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
-
-  defp show_volume_result({:ok, text}) do
-    Osd.show(text)
-  end
-
-  defp show_volume_result({:error, reason}) do
-    Logger.error("volume error: #{inspect(reason)}")
-    Osd.show("Volume unavailable")
-  end
 
   defp load_or_build_catalog!(mediadirs, true) do
     catalog =
