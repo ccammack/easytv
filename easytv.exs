@@ -999,134 +999,45 @@ defmodule RuntimeSupervisor do
         Supervisor.child_spec({InputDevice, [path: path, receiver: receiver]}, id: {:input_device, path})
       end)
 
-    children =
-      [
-        Supervisor.child_spec({Osd, [name: Osd]}, id: :osd)
-      ] ++ input_children
+    children = input_children
 
     Supervisor.init(children, strategy: :one_for_one)
   end
 end
 
 defmodule Osd do
-  use GenServer
+  require Logger
 
-  defmodule State do
-    defstruct [
-      :port,
-      :os_pid,
-      :args
-    ]
+  def show(text) when is_binary(text) do
+    run_osd_script([text])
   end
 
-  def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
+  def clear do
+    run_osd_script([])
   end
 
-  def show(server \\ __MODULE__, text) when is_binary(text) do
-    GenServer.cast(server, {:show, text})
+  defp osd_script_path do
+    Path.join(Path.dirname(Path.expand(__ENV__.file)), "easytv-osd.sh")
   end
 
-  def clear(server \\ __MODULE__) do
-    GenServer.cast(server, :clear)
-  end
+  defp run_osd_script(args) do
+    script = osd_script_path()
 
-  @impl true
-  def init(opts) do
-    args =
-      Keyword.get(opts, :args, [
-        "--position", "0",
-        "--x-offset", "32",
-        "--y-offset", "32",
-        "--padding", "16",
-        "--transparency", "0",
-        "--font", "monospace 24",
-        "--back-color", "black",
-        "--fore-color", "white",
-        "--fade-in", "0",
-        "--fade-full", "5000",
-        "--fade-out", "0",
-        "--lines", "1"
-      ])
+    case File.regular?(script) do
+      true ->
+        case System.cmd(script, args, stderr_to_stdout: true) do
+          {output, 0} ->
+            trimmed = String.trim(output)
+            if trimmed != "", do: Logger.debug("osd script output #{inspect(trimmed)}")
+            :ok
 
-    {:ok, %State{port: nil, os_pid: nil, args: args}}
-  end
+          {output, status} ->
+            {:error, {:script_failed, status, String.trim(output)}}
+        end
 
-  @impl true
-  def handle_cast({:show, text}, state) do
-    state =
-      state
-      |> stop_current_osd()
-      |> start_osd(text)
-
-    {:noreply, state}
-  end
-
-  def handle_cast(:clear, state) do
-    {:noreply, stop_current_osd(state)}
-  end
-
-  @impl true
-  def handle_info({port, {:exit_status, _status}}, %{port: port} = state) do
-    {:noreply, %{state | port: nil, os_pid: nil}}
-  end
-
-  def handle_info({_port, {:data, _data}}, state), do: {:noreply, state}
-  def handle_info(_msg, state), do: {:noreply, state}
-
-  @impl true
-  def terminate(_reason, state) do
-    _ = stop_current_osd(state)
-    :ok
-  end
-
-  defp start_osd(state, text) do
-    case System.find_executable("aosd_cat") do
-      nil ->
-        state
-
-      aosd_cat ->
-        port =
-          Port.open({:spawn_executable, aosd_cat}, [
-            :binary,
-            :use_stdio,
-            :hide,
-            :exit_status,
-            args: state.args
-          ])
-
-        os_pid =
-          case Port.info(port, :os_pid) do
-            {:os_pid, pid} -> pid
-            _ -> nil
-          end
-
-        Port.command(port, text <> "\n")
-
-        %{state | port: port, os_pid: os_pid}
+      false ->
+        {:error, {:script_missing, script}}
     end
-  end
-
-  defp stop_current_osd(%State{port: nil} = state), do: state
-
-  defp stop_current_osd(%State{port: port, os_pid: os_pid} = state) do
-    if is_integer(os_pid) do
-      System.cmd("kill", [Integer.to_string(os_pid)], stderr_to_stdout: true)
-    else
-      safe_port_close(port)
-    end
-
-    %{state | port: nil, os_pid: nil}
-  end
-
-  defp safe_port_close(port) do
-    try do
-      Port.close(port)
-    catch
-      _, _ -> :ok
-    end
-
-    :ok
   end
 end
 
