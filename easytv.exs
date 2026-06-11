@@ -1053,149 +1053,9 @@ defmodule Volume do
   def decrease, do: ScriptRunner.run("easytv-volume.sh", ["-"])
 end
 
-defmodule HdmiCec do
-  require Logger
-
-  @tv_logical_address "0"
-  @cec_client_args ["-s", "-d", "1"]
-
-  def available? do
-    not is_nil(System.find_executable("cec-client"))
-  end
-
-  def probe do
-    cond do
-      not available?() ->
-        Logger.info("hdmi_cec probe: cec-client not installed, using dpms fallback")
-        {:ok, :dpms}
-
-      true ->
-        case scan() do
-          {:ok, output} ->
-            if cec_scan_detects_device?(output) do
-              Logger.info("hdmi_cec probe: detected responsive cec device(s), using hdmi_cec backend")
-              {:ok, :hdmi_cec}
-            else
-              Logger.info("hdmi_cec probe: no responsive cec device detected, using dpms fallback")
-              {:ok, :dpms}
-            end
-
-          {:error, reason} ->
-            Logger.info("hdmi_cec probe failed #{inspect(reason)}, using dpms fallback")
-            {:ok, :dpms}
-        end
-    end
-  end
-
-  def power_on_tv do
-    command("on #{@tv_logical_address}")
-  end
-
-  def standby_tv do
-    command("standby #{@tv_logical_address}")
-  end
-
-  def active_source do
-    command("as")
-  end
-
-  def power_on_and_activate do
-    with {:ok, _} <- power_on_tv() do
-      Logger.info("hdmi_cec power_on_and_activate: tv power on sent, waiting before active source")
-      Process.sleep(1500)
-      try_active_source(1)
-    end
-  end
-
-  def scan do
-    command("scan")
-  end
-
-  def command(cmd) when is_binary(cmd) do
-    case System.find_executable("cec-client") do
-      nil ->
-        {:error, :cec_client_not_found}
-
-      cec_client ->
-        shell_cmd =
-          ~s{printf '%s\n' "#{escape_for_double_quotes(cmd)}" | "#{cec_client}" #{Enum.join(@cec_client_args, " ")}}
-
-      case System.cmd("sh", ["-lc", shell_cmd], stderr_to_stdout: true) do
-        {output, 0} ->
-          trimmed = String.trim(output)
-
-          if cec_output_has_error?(trimmed) do
-            {:error, {:cec_command_reported_error, cmd, trimmed}}
-          else
-            {:ok, trimmed}
-          end
-
-        {output, status} ->
-          {:error, {:cec_command_failed, cmd, status, String.trim(output)}}
-      end
-    end
-  end
-
-  defp cec_output_has_error?(output) when is_binary(output) do
-    text = String.downcase(output)
-
-    String.contains?(text, "cec_transmit failed") or
-      String.contains?(text, "ioctl cec_transmit failed") or
-      String.contains?(text, "errno=64") or
-      String.contains?(text, "failed to") or
-      String.contains?(text, "connection closed")
-  end
-
-  defp try_active_source(attempt) do
-    Logger.info("hdmi_cec active_source attempt=#{attempt}")
-
-    case active_source() do
-      {:ok, output} = ok ->
-        Logger.info("hdmi_cec active_source attempt=#{attempt} succeeded output=#{inspect(output)}")
-        ok
-
-      {:error, reason} ->
-        Logger.error("hdmi_cec active_source attempt=#{attempt} failed reason=#{inspect(reason)}; retrying forever")
-        Process.sleep(1500)
-        try_active_source(attempt + 1)
-    end
-  end
-
-  defp cec_scan_detects_device?(output) when is_binary(output) do
-    text = String.downcase(output)
-
-    cond do
-      String.contains?(text, "device #") -> true
-      String.contains?(text, "address:") -> true
-      String.contains?(text, "vendor:") -> true
-      String.contains?(text, "osd string:") -> true
-      true -> false
-    end
-  end
-
-  defp escape_for_double_quotes(value) do
-    value
-    |> String.replace("\\", "\\\\")
-    |> String.replace("\"", "\\\"")
-  end
-end
-
-defmodule DisplayDpms do
-  def force(mode) when mode in [:off, :on] do
-    case System.find_executable("xset") do
-      nil ->
-        {:error, :xset_not_found}
-
-      xset ->
-        case System.cmd(xset, ["dpms", "force", Atom.to_string(mode)], stderr_to_stdout: true) do
-          {output, 0} ->
-            {:ok, String.trim(output)}
-
-          {output, status} ->
-            {:error, {:xset_failed, status, String.trim(output)}}
-        end
-    end
-  end
+defmodule Power do
+  def tv_off, do: ScriptRunner.run("easytv-power.sh", ["0"])
+  def tv_on, do: ScriptRunner.run("easytv-power.sh", ["1"])
 end
 
 defmodule App do
@@ -1248,7 +1108,6 @@ defmodule App do
           preview_timer: nil,
           preview_active?: false,
           screen_off?: false,
-          display_backend: :dpms,
           channel_state: saved_channel_state,
           runtime_sup: nil,
           image_display_timer: nil,
@@ -1273,33 +1132,19 @@ defmodule App do
     Process.flag(:trap_exit, true)
     state = if Keyword.keyword?(state), do: Enum.into(state, %{}), else: state
     {:ok, runtime_sup} = RuntimeSupervisor.start_link(receiver: self())
-    {:ok, display_backend} = HdmiCec.probe()
 
     state =
       state
       |> Map.put(:runtime_sup, runtime_sup)
       |> Map.put(:screen_off?, false)
-      |> Map.put(:display_backend, display_backend)
       |> ensure_all_channel_state_entries()
 
-    case display_backend do
-      :hdmi_cec ->
-        case HdmiCec.power_on_and_activate() do
-          {:ok, _} ->
-            Logger.info("startup display backend=hdmi_cec; tv on and pi active source")
+    case Power.tv_on() do
+      :ok ->
+        Logger.info("init: tv on")
 
-          {:error, reason} ->
-            Logger.error("startup hdmi_cec activation failed #{inspect(reason)}")
-        end
-
-      :dpms ->
-        case DisplayDpms.force(:on) do
-          {:ok, _} ->
-            Logger.info("startup display backend=dpms; screen on")
-
-          {:error, reason} ->
-            Logger.error("startup dpms activation failed #{inspect(reason)}")
-        end
+      {:error, reason} ->
+        Logger.error("init: tv on failed #{inspect(reason)}")
     end
 
     case state.current_channel do
@@ -1664,7 +1509,7 @@ defmodule App do
 
   defp turn_screen_off(state) do
     Logger.info(
-      "turn_screen_off: backend=#{inspect(state.display_backend)} " <>
+      "turn_screen_off: " <>
         "current_channel=#{inspect(state.current_channel && state.current_channel.label)} " <>
         "current_file_index=#{inspect(state.current_file_index)} " <>
         "current_player=#{inspect(state.current_player)} " <>
@@ -1682,39 +1527,13 @@ defmodule App do
 
     Process.sleep(150)
 
-    state =
-      case state.display_backend do
-        :hdmi_cec ->
-          case HdmiCec.standby_tv() do
-            {:ok, _} ->
-              Logger.info("tv standby via hdmi_cec")
-              state
+    case Power.tv_off() do
+      :ok ->
+        Logger.info("tv off")
 
-            {:error, reason} ->
-              Logger.error("hdmi_cec standby failed #{inspect(reason)}; falling back to dpms")
-
-              case DisplayDpms.force(:off) do
-                {:ok, _} ->
-                  Logger.info("screen off via dpms fallback")
-
-                {:error, dpms_reason} ->
-                  Logger.error("dpms fallback off failed #{inspect(dpms_reason)}")
-              end
-
-              Map.put(state, :display_backend, :dpms)
-          end
-
-        :dpms ->
-          case DisplayDpms.force(:off) do
-            {:ok, _} ->
-              Logger.info("screen off via dpms")
-
-            {:error, reason} ->
-              Logger.error("failed to turn screen off via dpms #{inspect(reason)}")
-          end
-
-          state
-      end
+      {:error, reason} ->
+        Logger.error("tv off failed #{inspect(reason)}")
+    end
 
     Map.put(state, :screen_off?, true)
   end
@@ -1728,87 +1547,64 @@ defmodule App do
 
   defp wake_screen(state) do
     Logger.info(
-      "wake_screen: backend=#{inspect(state.display_backend)} " <>
+      "wake_screen: " <>
         "current_channel=#{inspect(state.current_channel && state.current_channel.label)} " <>
-        "savedcurrentchannelid=#{inspect(state.current_channel_id)} " <>
+        "saved_current_channel_id=#{inspect(state.current_channel_id)} " <>
         "screen_off?=#{inspect(state.screen_off?)}"
     )
 
-    state =
-      case state.display_backend do
-        :hdmi_cec ->
-          case HdmiCec.power_on_and_activate() do
-            {:ok, _} ->
-              Logger.info("tv powered on and pi restored as active source via hdmi_cec")
-              state
+    case Power.tv_on() do
+      :ok ->
+        Logger.info("wake_screen: tv on")
 
-            {:error, reason} ->
-              Logger.error("hdmi_cec wake failed #{inspect(reason)}; falling back to dpms")
+        Process.sleep(@screen_wake_delay_ms)
 
-              case DisplayDpms.force(:on) do
-                {:ok, _} ->
-                  Logger.info("screen on via dpms fallback")
-
-                {:error, dpms_reason} ->
-                  Logger.error("dpms fallback on failed #{inspect(dpms_reason)}")
-              end
-
-              Map.put(state, :display_backend, :dpms)
-          end
-
-        :dpms ->
-          case DisplayDpms.force(:on) do
-            {:ok, _} ->
-              Logger.info("screen on via dpms")
-
-            {:error, reason} ->
-              Logger.error("failed to turn screen on via dpms #{inspect(reason)}")
-          end
-
+        state =
           state
-      end
+          |> clear_transition_state()
+          |> Map.put(:screen_off?, false)
+          |> Map.put(:preview_channel, nil)
+          |> Map.put(:preview_timer, nil)
+          |> Map.put(:preview_active?, false)
 
-    Process.sleep(@screen_wake_delay_ms)
+        case state.current_channel do
+          nil ->
+            Logger.debug("wake_screen: no current channel to resume")
+            state
 
-    state =
-      state
-      |> clear_transition_state()
-      |> Map.put(:screen_off?, false)
-      |> Map.put(:preview_channel, nil)
-      |> Map.put(:preview_timer, nil)
-      |> Map.put(:preview_active?, false)
-
-    case state.current_channel do
-      nil ->
-        Logger.debug("wake_screen: no current channel to resume")
-        state
-
-      channel ->
-        {file_index, offset_seconds, state} = load_or_initialize_channel_position(state, channel)
-
-        Logger.info(
-          "wake_screen: resuming channel=#{channel.label} " <>
-            "requested_file_index=#{inspect(file_index)} offset_seconds=#{inspect(offset_seconds)}"
-        )
-
-        case play_channel_item(state, channel, file_index, offset_seconds) do
-          {:ok, state, actual_file_index} ->
-            actual_path = Enum.at(channel.media, actual_file_index)
+          channel ->
+            {file_index, offset_seconds, state} =
+              load_or_initialize_channel_position(state, channel)
 
             Logger.info(
-              "wake_screen: resumed channel=#{channel.label} " <>
-                "actual_file_index=#{actual_file_index} actual_path=#{inspect(actual_path)} " <>
+              "wake_screen: resuming channel=#{channel.label} " <>
+                "requested_file_index=#{inspect(file_index)} " <>
                 "offset_seconds=#{inspect(offset_seconds)}"
             )
 
-            Osd.show(channel.name)
+            case play_channel_item(state, channel, file_index, offset_seconds) do
+              {:ok, state, actual_file_index} ->
+                actual_path = Enum.at(channel.media, actual_file_index)
 
-            state
+                Logger.info(
+                  "wake_screen: resumed channel=#{channel.label} " <>
+                    "actual_file_index=#{actual_file_index} " <>
+                    "actual_path=#{inspect(actual_path)} " <>
+                    "offset_seconds=#{inspect(offset_seconds)}"
+                )
 
-          {:error, state, reason} ->
-            Logger.error("failed to resume after screen wake: #{inspect(reason)}")
-            state
+                Osd.show(channel.name)
+                state
+
+              {:error, state, reason} ->
+                Logger.error("wake_screen: failed to resume #{inspect(reason)}")
+                state
+            end
         end
+
+      {:error, reason} ->
+        Logger.error("wake_screen: tv on failed #{inspect(reason)}")
+        state
     end
   end
 
