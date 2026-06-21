@@ -1,12 +1,15 @@
 # Introduction
 
 `easytv` wraps [mpv](https://github.com/mpv-player/mpv) to create a minimal TV appliance for Raspberry Pi.
+I run it on a Raspberry Pi 4B v1.2 4GB at 1080P using [FLIRC](https://flirc.tv/) and an EZclicker 6-button remote.
 
-I run it on a Raspberry Pi 4B v1.2 4GB with [FLIRC](https://flirc.tv/) and an EZclicker 6-button remote. It is not configurable and may not run on anything else without modification.
+The application calls external shell scripts to display OSD messages using `aosd_cat`, change volume using `amixer`, and control TV power using  `dpms` or `cec-client`.
+Aside from that, it is not really user-configurable and may not run on anything else without modification.
 
-It accepts a list of *media root* directories passed on the command line and treats each child directory below a *media root* as a media *channel*.
+The application defines *channels* by convention;
+it accepts a list of *media root* directories passed on the command line and treats each child directory below a *media root* as a *channel*.
+For example, given the directory structure shown below, passing `/mnt/media` as a *media root* will create *channels* called `Movies (1940s)` and `Scrapbook`.
 
-For example, passing `/mnt/media` as a *media root* here will treat its children as *channels* called `Movies (1940s)` and `Scrapbook`.
 Hidden files and directories starting with `.` will be skipped, so `.inbox` will not act as a *channel*.
 
 ``` sh
@@ -21,22 +24,44 @@ Hidden files and directories starting with `.` will be skipped, so `.inbox` will
 │   └── digital frame media
 ```
 
-The media files in each *channel* subtree, at any depth, will be played as a long looping playlist.
+The files in each *channel* subtree, at any depth, will be played as a long looping playlist when that *channel* is active.
 
 Switching *channels* will save the current playhead position so it can be restored later when the *channel* is resumed.
 
-The *toggle playback* command will save the current playhead position and send the `HDMI-CEC` poweroff signal to the connected TV. I cover the IR sensor on the TV to allow the Pi to handle it.
+The *power off* command will save the current playhead position and send a poweroff signal to the connected TV over HDMI.
+
+-- TODO: I cover the IR sensor on the TV to allow the Pi to control it.
 
 # Installation
 
-Start with a fresh install of Raspberry Pi OS Lite x64:
+Start with a fresh install of Raspberry Pi OS Lite x64.
+Enable `ssh` when writing the microSD card using the [Raspberry Pi Imager](https://www.raspberrypi.com/software/).
 
-``` sh
+Connect the Pi to a USB keyboard and to the TV over HDMI, boot, and log in over `ssh`:
+
+```sh
+ccammack@host:~$ ssh rpi
+Linux rpi 6.12.75+rpt-rpi-v8 #1 SMP PREEMPT Debian 1:6.12.75-1+rpt1 (2026-03-11) aarch64
+
+The programs included with the Debian GNU/Linux system are free software;
+the exact distribution terms for each program are described in the
+individual files in /usr/share/doc/*/copyright.
+
+Debian GNU/Linux comes with ABSOLUTELY NO WARRANTY, to the extent
+permitted by applicable law.
+Last login: Sun Jun 21 05:59:21 2026 from 2607:fb90:4080:a836:5487:6fea:0:c09
+
+$ pwd
+/home/ccammack
+
+$ whoami
+ccammack
+
 $ cat /etc/os-release | grep PRETTY_NAME
 PRETTY_NAME="Debian GNU/Linux 13 (trixie)"
 
 $ uname -a
-Linux player 6.12.75+rpt-rpi-v8 #1 SMP PREEMPT Debian 1:6.12.75-1+rpt1 (2026-03-11) aarch64 GNU/Linux
+Linux rpi 6.12.75+rpt-rpi-v8 #1 SMP PREEMPT Debian 1:6.12.75-1+rpt1 (2026-03-11) aarch64 GNU/Linux
 ```
 
 Configure the user to log into the console automatically:
@@ -68,18 +93,20 @@ Install prerequisites:
 
 ``` sh
 $ sudo apt update
-$ sudo apt install -y elixir x11-xserver-utils xterm mpv aosd_cat libvips-tools cec-utils
+$ sudo apt install -y git elixir x11-xserver-utils xterm mpv aosd_cat libvips-tools cec-utils
 ```
 
-Download `bash_profile`, `easytv.exs`, and `.xinitrc` from this repo:
+Clone the repo:
+
+-- TODO: clone the repo
 
 ``` sh
-$ cd
-$ wget https://raw.githubusercontent.com/ccammack/easytv/main/.bash_profile
-$ wget https://raw.githubusercontent.com/ccammack/easytv/main/easytv.exs
-$ chmod +x ./easytv.exs
-$ wget https://raw.githubusercontent.com/ccammack/easytv/main/.xinitrc
-$ chmod +x ./.xinitrc
+$ git clone
+[...]
+
+$ cd easytv
+$ pwd
+/home/ccammack/easytv
 ```
 
 The `.bash_profile` just starts X:
@@ -97,15 +124,95 @@ if [[ -z "$DISPLAY" && "$(tty)" == "/dev/tty1" ]]; then
 fi
 ```
 
-The `.xinit` file runs `easytv` with one or more *media root* directories:
+The default `.xinit` file just runs `xterm` for use during installation,
+but also contains a commented line to run `easytv` with `/mnt/media/` as its *media root* directory:
 
 ``` sh
 $ cat .xinitrc
 #!/bin/sh
 
-# exec xterm
-exec systemd-cat -t easytv "$HOME"/easytv.exs --scan /mnt/media/ 2>&1
+exec xterm -maximized   
+# exec systemd-cat -t easytv "$HOME"/easytv.exs --scan /mnt/media/ 2>&1
 ```
+
+Copy `.bash_profile` and `.xinit` from `easytv` to the `$HOME` directory, then run `startx` to start X Windows and `xterm`:
+
+``` sh
+$ cp .bash_profile $HOME
+$ cp .xinitrc $HOME
+$ startx
+```
+
+# Test Shell Scripts
+
+After `xterm` starts, test the included shell scripts to make sure OSD, volume, and TV power control work properly:
+
+``` sh
+$ DISPLAY=:0 XAUTHORITY=$HOME/.Xauthority ./easytv-osd.sh Hello
+$ DISPLAY=:0 XAUTHORITY=$HOME/.Xauthority ./easytv-volume.sh +
+$ DISPLAY=:0 XAUTHORITY=$HOME/.Xauthority ./easytv-volume.sh -
+$ DISPLAY=:0 XAUTHORITY=$HOME/.Xauthority ./easytv-power.sh 0
+$ DISPLAY=:0 XAUTHORITY=$HOME/.Xauthority ./easytv-power.sh 1
+```
+
+The default TV power script uses *HDMI-CEC*, but a sample script is also included to use `dpms` for testing on a monitor instead.
+
+# Test Main Application
+
+If the shell scripts control the TV properly, download some sample videos and test the main application:
+
+``` sh
+$ curl http://vjs.zencdn.net/v/oceans.mp4 --create-dirs --output /tmp/media/ocean/video.mp4
+$ curl https://media.w3.org/2010/05/sintel/trailer.mp4 --create-dirs --output /tmp/media/sintel/video.mp4
+$ curl https://samplelib.com/lib/preview/mp4/sample-5s.mp4 --create-dirs --output /tmp/media/sample/video.mp4
+
+$ DISPLAY=:0 XAUTHORITY=$HOME/.Xauthority ./easytv.exs --scan /tmp/media/ 2>&1
+[...]
+
+$ pkill easytv
+$ pkill mpv
+```
+
+# Test Hotkeys
+
+`easytv` supports 7 keyboard hotkeys, which should work using the keyboard connected to the Pi.
+Use [FLIRC](https://flirc.tv/)'s configuration software to map remote buttons to these keyboard keys:
+
+| Hotkey   | Behavior                         |
+| ---------| -------------------------------- |  
+| Spacebar | Toggle playback and screen power |
+| +        | Volume up                        |
+| -        | Volume down                      |
+| m        | Toggle volume mute               |
+| PageUp   | Next channel                     |
+| PageDown | Prev channel                     |
+| q        | Quit                             |
+
+# Deploy
+
+After everything works, organize your media files.
+They can be placed directly on the Pi, or on an external drive, or accessed over the LAN with proper configuration.
+The next section explains how to mount `/mnt/media` to a NAS on the LAN over `smb`.
+
+Change the `.xinitrc` file in the `$HOME` directory to run `easytv` instead of `xterm` on login.
+Change the *media root* path from `/mnt/media` to something else if needed.
+
+After rebooting, `easytv` should automatically start and begin playing media.
+
+``` sh
+$ nano $HOME/.xinitrc
+[...]
+
+$ cat $HOME/.xinitrc
+#!/bin/sh
+
+# exec xterm -maximized   
+exec systemd-cat -t easytv "$HOME"/easytv.exs --scan /mnt/media/ 2>&1
+
+$ sudo reboot
+```
+
+# Organize Media
 
 In my `.xinitrc`, */mnt/media* is a mount point for a [TrueNAS](https://www.truenas.com/) SMB share, which I mounted as read-only using a root-owned credentials file:
 
@@ -147,24 +254,11 @@ $ touch /mnt/media/test
 touch: cannot touch '/mnt/media/test': Read-only file system
 ```
 
-# Hotkeys
-
-`easytv` supports 6 hotkeys. Use FLIRC's configuration software to map remote buttons to these keyboard keys:
-
-| Hotkey   | Behavior                         |
-| ---------| -------------------------------- |  
-| Spacebar | Toggle playback and screen power |
-| +        | Volume up                        |
-| -        | Volume down                      |
-| m        | Toggle volume mute               |
-| PageUp   | Next channel                     |
-| PageDown | Prev channel                     |
-
 # Development Over `ssh`
 
-The user configuration described here makes it difficult to start and stop the application manually for testing.
+The deployed user configuration described here makes it difficult to start and stop the application manually for testing.
 
-To work around this, temporarily change `.xinitrc` to run `exec xterm` rather than `exec easytv`.
+To work around this, temporarily change `.xinitrc` to run `xterm` rather than `easytv`:
 
 ``` sh
 $ cat .xinitrc
