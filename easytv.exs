@@ -251,7 +251,7 @@ end
 defmodule PreparedMedia do
   require Logger
 
-  @max_image_dimension 3840
+  @max_image_dimension 1920
   @keep_last_files 4
 
   def prepare(path) when is_binary(path) do
@@ -484,7 +484,12 @@ defmodule MpvPlayer do
     start_pos = Keyword.get(opts, :start_pos, 0)
     socket_path = socket_path()
 
-    File.rm(socket_path)
+    case File.rm(socket_path) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} ->
+        Logger.warning("could not remove stale socket #{socket_path}: #{inspect(reason)}")
+    end
 
     image_file? = PreparedMedia.image_file?(file)
 
@@ -498,11 +503,9 @@ defmodule MpvPlayer do
       "--input-ipc-server=#{socket_path}",
       "--title=#{Script.name()}",
       "--osd-level=0",
-      "--cache=yes",
-      "--cache-secs=30",
-      "--stream-buffer-size=2MiB",
-      "--demuxer-max-bytes=150MiB",
-      "--demuxer-max-back-bytes=50MiB"
+      "--cache=no",
+      "--profile=fast",
+      "--hwdec=auto"
     ]
 
     playback_argv =
@@ -1064,7 +1067,6 @@ defmodule App do
 
   @preview_commit_ms 2000
   @resume_rewind_seconds 3
-  @screen_wake_delay_ms 5000
   @slideshow_image_display_ms 10_000
 
   def main(argv) do
@@ -1508,25 +1510,6 @@ defmodule App do
   defp toggle_screen(state), do: turn_screen_off(state)
 
   defp turn_screen_off(state) do
-    Logger.info(
-      "turn_screen_off: " <>
-        "current_channel=#{inspect(state.current_channel && state.current_channel.label)} " <>
-        "current_file_index=#{inspect(state.current_file_index)} " <>
-        "current_player=#{inspect(state.current_player)} " <>
-        "preview_active?=#{inspect(state.preview_active?)} " <>
-        "next_prepare_ref=#{inspect(state.next_prepare_ref)} " <>
-        "next_prepared?=#{inspect(not is_nil(state.next_prepared))}"
-    )
-
-    state =
-      state
-      |> clear_transition_state()
-      |> cancel_active_preview()
-      |> persist_current_channel_position()
-      |> stop_current_item()
-
-    Process.sleep(150)
-
     case Power.tv_off() do
       :ok ->
         Logger.info("tv off")
@@ -1546,65 +1529,82 @@ defmodule App do
   end
 
   defp wake_screen(state) do
-    Logger.info(
-      "wake_screen: " <>
-        "current_channel=#{inspect(state.current_channel && state.current_channel.label)} " <>
-        "saved_current_channel_id=#{inspect(state.current_channel_id)} " <>
-        "screen_off?=#{inspect(state.screen_off?)}"
-    )
-
     case Power.tv_on() do
       :ok ->
         Logger.info("wake_screen: tv on")
-
-        Process.sleep(@screen_wake_delay_ms)
-
-        state =
-          state
-          |> clear_transition_state()
-          |> Map.put(:screen_off?, false)
-          |> Map.put(:preview_channel, nil)
-          |> Map.put(:preview_timer, nil)
-          |> Map.put(:preview_active?, false)
-
-        case state.current_channel do
-          nil ->
-            Logger.debug("wake_screen: no current channel to resume")
-            state
-
-          channel ->
-            {file_index, offset_seconds, state} =
-              load_or_initialize_channel_position(state, channel)
-
-            Logger.info(
-              "wake_screen: resuming channel=#{channel.label} " <>
-                "requested_file_index=#{inspect(file_index)} " <>
-                "offset_seconds=#{inspect(offset_seconds)}"
-            )
-
-            case play_channel_item(state, channel, file_index, offset_seconds) do
-              {:ok, state, actual_file_index} ->
-                actual_path = Enum.at(channel.media, actual_file_index)
-
-                Logger.info(
-                  "wake_screen: resumed channel=#{channel.label} " <>
-                    "actual_file_index=#{actual_file_index} " <>
-                    "actual_path=#{inspect(actual_path)} " <>
-                    "offset_seconds=#{inspect(offset_seconds)}"
-                )
-
-                Osd.show(channel.name)
-                state
-
-              {:error, state, reason} ->
-                Logger.error("wake_screen: failed to resume #{inspect(reason)}")
-                state
-            end
-        end
+        Map.put(state, :screen_off?, false)
 
       {:error, reason} ->
         Logger.error("wake_screen: tv on failed #{inspect(reason)}")
         state
+    end
+  end
+
+  defp pause_playback(state) do
+    Logger.info(
+      "pause_playback: " <>
+        "current_channel=#{inspect(state.current_channel && state.current_channel.label)} " <>
+        "current_file_index=#{inspect(state.current_file_index)} " <>
+        "current_player=#{inspect(state.current_player)} " <>
+        "preview_active?=#{inspect(state.preview_active?)} " <>
+        "next_prepare_ref=#{inspect(state.next_prepare_ref)} " <>
+        "next_prepared?=#{inspect(not is_nil(state.next_prepared))}"
+    )
+
+    state
+    |> clear_transition_state()
+    |> cancel_active_preview()
+    |> persist_current_channel_position()
+    |> stop_current_item()
+  end
+
+  defp resume_playback(state) do
+    Logger.info(
+      "resume_playback: " <>
+        "current_channel=#{inspect(state.current_channel && state.current_channel.label)} " <>
+        "saved_current_channel_id=#{inspect(state.current_channel_id)}"
+    )
+
+    state =
+      state
+      |> clear_transition_state()
+      |> Map.put(:preview_channel, nil)
+      |> Map.put(:preview_timer, nil)
+      |> Map.put(:preview_active?, false)
+
+    case state.current_channel do
+      nil ->
+        Logger.debug("resume_playback: no current channel to resume")
+        state
+
+      channel ->
+        {file_index, offset_seconds, state} =
+          load_or_initialize_channel_position(state, channel)
+
+        Logger.info(
+          "resume_playback: resuming channel=#{channel.label} " <>
+            "requested_file_index=#{inspect(file_index)} " <>
+            "offset_seconds=#{inspect(offset_seconds)}"
+        )
+
+        case play_channel_item(state, channel, file_index, offset_seconds) do
+          {:ok, state, actual_file_index} ->
+            actual_path = Enum.at(channel.media, actual_file_index)
+
+            Logger.info(
+              "resume_playback: resumed channel=#{channel.label} " <>
+                "actual_file_index=#{actual_file_index} " <>
+                "actual_path=#{inspect(actual_path)} " <>
+                "offset_seconds=#{inspect(offset_seconds)}"
+            )
+
+            Osd.show(channel.name)
+            state
+
+          {:error, state, reason} ->
+            Logger.error("resume_playback: failed to resume #{inspect(reason)}")
+            state
+        end
     end
   end
 
@@ -1787,29 +1787,29 @@ defmodule App do
   end
 
   defp try_play_channel_item(
-        state,
-        _channel,
-        _media,
-        _requested_index,
-        _offset_seconds,
-        _candidate_index,
-        attempts,
-        max_attempts
-      )
-      when attempts >= max_attempts do
+         state,
+         _channel,
+         _media,
+         _requested_index,
+         _offset_seconds,
+         _candidate_index,
+         attempts,
+         max_attempts
+       )
+       when attempts >= max_attempts do
     {:error, state, {:channel_unavailable, :no_playable_files}}
   end
 
   defp try_play_channel_item(
-        state,
-        channel,
-        media,
-        requested_index,
-        offset_seconds,
-        candidate_index,
-        attempts,
-        max_attempts
-      ) do
+         state,
+         channel,
+         media,
+         requested_index,
+         offset_seconds,
+         candidate_index,
+         attempts,
+         max_attempts
+       ) do
     path = Enum.at(media, candidate_index)
 
     Logger.debug(
@@ -1865,8 +1865,8 @@ defmodule App do
         )
 
         with {:ok, prepared} <- PreparedMedia.prepare(path),
-            {:ok, new_state, _} <-
-              start_current_item(state, channel, candidate_index, prepared, actual_offset) do
+             {:ok, new_state, _} <-
+               start_current_item(state, channel, candidate_index, prepared, actual_offset) do
           actual_path = Enum.at(media, candidate_index)
 
           Logger.info(
@@ -1983,11 +1983,6 @@ defmodule App do
     state
   end
 
-  defp maybe_prepare_next_item(%{screen_off?: true} = state) do
-    Logger.debug("maybe_prepare_next_item: skip screen off")
-    state
-  end
-
   defp maybe_prepare_next_item(%{next_prepare_task: task} = state) when not is_nil(task) do
     Logger.debug("maybe_prepare_next_item: skip task already running")
     state
@@ -2014,7 +2009,7 @@ defmodule App do
       ref = make_ref()
 
       Logger.debug(
-        "maybe_prepare_next_item: starting async prepare next_index=#{next_index} next_path=#{inspect(next_path)} current_index=#{inspect(state.current_file_index)} current_path=#{inspect(current_original_path(state))}"
+        "maybe_prepare_next_item: starting async prepare next_index=#{next_index} next_path=#{inspect(next_path)} current_index=#{inspect(state.current_file_index)} current_path=#{inspect(current_original_path(state))} screen_off?=#{inspect(state.screen_off?)}"
       )
 
       task =
