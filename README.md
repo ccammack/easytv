@@ -72,6 +72,51 @@ $ sudo raspi-config
 # System Options -> Auto Login -> ...automatically log in to the console? -> Yes
 ```
 
+Configure HDMI audio output using PulseAudio:
+
+$ sudo apt install pulseaudio
+
+$ systemctl --user enable pulseaudio
+Created symlink '/home/ccammack/.config/systemd/user/default.target.wants/pulseaudio.service' → '/usr/lib/systemd/user/pulseaudio.service'.
+Created symlink '/home/ccammack/.config/systemd/user/sockets.target.wants/pulseaudio.socket' → '/usr/lib/systemd/user/pulseaudio.socket'.
+$ systemctl --user enable pulseaudio.socket
+
+$ pactl list sinks short
+0       alsa_output.platform-fe00b840.mailbox.stereo-fallback   module-alsa-card.c      s16le 2ch 48000Hz       RUNNING
+1       alsa_output.platform-fef00700.hdmi.hdmi-stereo  module-alsa-card.c      s16le 2ch 44100Hz       SUSPENDED
+
+
+
+$ pactl set-default-sink <sink-name>
+$ speaker-test -t sine -f 440
+
+If you want the default sink to persist across reboots, you can either:
+
+Re-run pactl set-default-sink ... from a small script on startup, or
+
+Put a set-default-sink line into /etc/pulse/default.pa so PulseAudio initializes with that default
+
+---
+
+Configure audio output. On the Pi 4B, `hdmi-0` is the one in the middle, next to the USB power port.
+
+```sh
+$ sudo raspi-config
+
+# System Options -> Audio -> *-hdmi-0
+```
+
+Lock the Pi's output to 720p by appending `video=HDMI-A-1:1280x720M@60` to the end of `/boot/firmware/cmdline.txt`:
+
+``` sh
+$ sudo nano /boot/firmware/cmdline.txt
+[...]
+
+$ sudo cat /boot/firmware/cmdline.txt
+console=serial0,115200 console=tty1 root=PARTUUID=4ea15ea7-02 rootfstype=ext4 fsck.repair=yes rootwait ds=nocloud;i=rpi-imager-1778412046820 cfg80211.ieee80211_regdom=US video=HDMI-A-1:1280x720M@60
+```
+
+
 Lock the Pi's output to 1080p:
 
 ``` sh
@@ -143,19 +188,89 @@ $ cp .xinitrc $HOME
 $ startx
 ```
 
-# Test Shell Scripts
-
-After `xterm` starts, test the included shell scripts to make sure OSD, volume, and TV power control work properly:
+Use `cec_client` to get the logical device numbers for the TV and the RPi, the change `easytv-power.sh` to use those device numbers:
 
 ``` sh
-$ DISPLAY=:0 XAUTHORITY=$HOME/.Xauthority ./easytv-osd.sh Hello
-$ DISPLAY=:0 XAUTHORITY=$HOME/.Xauthority ./easytv-volume.sh +
-$ DISPLAY=:0 XAUTHORITY=$HOME/.Xauthority ./easytv-volume.sh -
+$ echo "scan" | cec-client -d 1 -s -o easytv
+log level set to 1
+using osd name easytv
+opening a connection to the CEC adapter...
+requesting CEC bus information ...
+CEC bus information
+===================
+device #0: TV
+address:       0.0.0.0
+active source: no
+vendor:        Unknown
+osd string:    TV
+CEC version:   1.4
+power status:  in transition from standby to on
+language:      ???
+
+device #1: Recorder 1
+address:       1.0.0.0
+active source: no
+vendor:        Pulse Eight
+osd string:    easytv
+CEC version:   1.4
+power status:  on
+language:      eng
+
+device #4: Playback 1
+address:       2.0.0.0
+active source: yes
+vendor:        Toshiba
+osd string:    Fire TV Stick
+CEC version:   1.4
+power status:  on
+language:      ???
+
+currently active source: Playback 1 (4)
+
+$ nano easytv-power.sh
+[...]
+
+$ cat -8 easytv-power.sh
+[...]
+```
+
+# Test Equipment Control Scripts
+
+`easytv` relies on three shell scripts to control the connected TV.
+These can be modified as needed to support different configurations.
+After `xterm` starts, test a few of the included scripts to see what they do.
+
+* `easytv-osd.sh` displays on-screen messages
+* `easytv-power.sh` turns the connected TV on and off
+* `easytv-volume.sh` adjusts the volume
+
+## OSD
+
+The `easytv-osd.sh` script uses `aosd_cat` to display text messages on screen:
+
+``` sh
+$ DISPLAY=:0 XAUTHORITY=$HOME/.Xauthority ./easytv-osd.sh Hello, World!
+```
+
+## Power
+
+The `easytv-power.sh` script uses `cec-client` to control the TV power state using HDMI-CEC.
+The repo includes a sample script that uses `dpms` instead, intended for use with a computer monitor.
+
+``` sh
 $ DISPLAY=:0 XAUTHORITY=$HOME/.Xauthority ./easytv-power.sh 0
 $ DISPLAY=:0 XAUTHORITY=$HOME/.Xauthority ./easytv-power.sh 1
 ```
 
-The default TV power script uses *HDMI-CEC*, but a sample script is also included to use `dpms` for testing on a monitor instead.
+## Volume
+
+My remote works to control the TV volume directly over IR, so the default `easytv-volume.sh` is just a placeholder.
+The repo includes a sample script to adjust the volume on the Pi using `amixer` instead if needed.
+
+``` sh
+$ DISPLAY=:0 XAUTHORITY=$HOME/.Xauthority ./easytv-volume.sh +
+$ DISPLAY=:0 XAUTHORITY=$HOME/.Xauthority ./easytv-volume.sh -
+```
 
 # Test Main Application
 
@@ -292,6 +407,13 @@ Use `journalctl` to view the logs:
 $ journalctl -t easytv -f
 $ journalctl -t easytv --since "1 hour ago"
 ```
+
+# Coexisting with Other HDMI Devices
+
+The configuration described here works very well if the RPi is the only device attached to the TV.
+Adding other devices can lead to contention.
+I also have a Firestick on the TV as HDMI-2, and it seems that the Firestick will notice the TV turning on and try to make itself the active input.
+To work around this, the `easytv-power.sh` script runs a background process to seize the input as long as media is playing.
 
 # References
 
