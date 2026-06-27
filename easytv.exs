@@ -1242,7 +1242,7 @@ defmodule App do
         persisted_resume_offset(seconds)
       end
 
-    state = state |> put_current_playhead(saved_offset_seconds) |> persist_state_file!()
+    state = put_current_playhead(state, saved_offset_seconds)
     {:noreply, state}
   end
 
@@ -1510,15 +1510,14 @@ defmodule App do
   defp toggle_screen(state), do: turn_screen_off(state)
 
   defp turn_screen_off(state) do
-    case Power.tv_off() do
-      :ok ->
-        Logger.info("tv off")
+    state = persist_current_channel_position(state)
 
-      {:error, reason} ->
-        Logger.error("tv off failed #{inspect(reason)}")
+    case Power.tv_off() do
+      :ok -> Logger.info("tv off")
+      {:error, reason} -> Logger.error("tv off failed #{inspect(reason)}")
     end
 
-    Map.put(state, :screen_off?, true)
+    Map.put(state, :screenoff?, true)
   end
 
   defp cancel_active_preview(%{preview_active?: false} = state), do: state
