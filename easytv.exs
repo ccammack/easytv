@@ -1061,12 +1061,176 @@ defmodule Power do
   def tv_on, do: ScriptRunner.run("easytv-power.sh", ["1"])
 end
 
+defmodule App.Util do
+  require Logger
+
+  def wake_keypress?(events) do
+    Enum.any?(events, fn
+      {:ev_key, _key, 1} -> true
+      _ -> false
+    end)
+  end
+
+  def current_original_path(%{current_channel: nil}), do: nil
+  def current_original_path(%{current_file_index: idx}) when not is_integer(idx), do: nil
+  def current_original_path(state), do: Enum.at(state.current_channel.media, state.current_file_index)
+
+  def channel_id(channel), do: channel.path
+
+  def normalize_index(value, media) when is_integer(value) do
+    count = length(media)
+
+    cond do
+      count <= 0 -> 0
+      value >= 0 -> rem(value, count)
+      true -> 0
+    end
+  end
+
+  def normalize_index(_value, _media), do: 0
+
+  def next_file_index(current_index, media) when is_list(media) and media != [] do
+    rem(normalize_index(current_index, media) + 1, length(media))
+  end
+
+  def next_file_index(_current_index, _media), do: 0
+
+  def normalize_offset(value) when is_integer(value) and value >= 0, do: value
+  def normalize_offset(value) when is_float(value) and value >= 0, do: trunc(value)
+  def normalize_offset(_), do: 0
+
+  def current_channel_index(channels, channel) do
+    Enum.find_index(channels, &same_channel?(&1, channel)) || 0
+  end
+
+  def same_channel?(nil, nil), do: true
+  def same_channel?(nil, _), do: false
+  def same_channel?(_, nil), do: false
+  def same_channel?(a, b), do: channel_id(a) == channel_id(b)
+
+  def cancel_preview_timer(nil), do: :ok
+  def cancel_preview_timer(timer_ref), do: Process.cancel_timer(timer_ref)
+
+  def cancel_image_display_timer(nil), do: :ok
+
+  def cancel_image_display_timer(timer_ref) do
+    result = Process.cancel_timer(timer_ref)
+
+    Logger.debug(
+      "cancel_image_display_timer: timer_ref=#{inspect(timer_ref)} cancel_result=#{inspect(result)}"
+    )
+
+    result
+  end
+end
+
+defmodule App.Persistence do
+  require Logger
+
+  @resume_rewind_seconds 3
+
+  def persist_current_channel_position(%{current_channel: nil} = state), do: persist_state_file!(state)
+
+  def persist_current_channel_position(%{current_channel_id: nil} = state),
+    do: persist_state_file!(state)
+
+  def persist_current_channel_position(%{current_file_index: idx} = state)
+      when not is_integer(idx),
+      do: persist_state_file!(state)
+
+  def persist_current_channel_position(state), do: persist_state_file!(state)
+
+  def put_current_playhead(%{current_channel: nil} = state, _offset_seconds), do: state
+  def put_current_playhead(%{current_channel_id: nil} = state, _offset_seconds), do: state
+
+  def put_current_playhead(%{current_file_index: idx} = state, _offset_seconds)
+      when not is_integer(idx),
+      do: state
+
+  def put_current_playhead(state, offset_seconds) do
+    current_path = App.Util.current_original_path(state)
+
+    normalized_offset =
+      if PreparedMedia.image_file?(current_path) do
+        0
+      else
+        App.Util.normalize_offset(offset_seconds)
+      end
+
+    Logger.debug(
+      "put_current_playhead: channel_id=#{inspect(state.current_channel_id)} file_index=#{inspect(state.current_file_index)} path=#{inspect(current_path)} offset_seconds=#{normalized_offset}"
+    )
+
+    updated_channel_state =
+      Map.put(state.channel_state, state.current_channel_id, %{
+        "file_path" => current_path,
+        "offset_seconds" => normalized_offset
+      })
+
+    %{state | channel_state: updated_channel_state}
+  end
+
+  def ensure_all_channel_state_entries(state) do
+    channel_state =
+      Enum.reduce(state.channels, state.channel_state, fn channel, acc ->
+        Map.put_new(acc, App.Util.channel_id(channel), %{"file_path" => nil, "offset_seconds" => 0})
+      end)
+
+    %{state | channel_state: channel_state}
+  end
+
+  def load_or_initialize_channel_position(state, channel) do
+    id = App.Util.channel_id(channel)
+
+    case Map.fetch(state.channel_state, id) do
+      {:ok, %{"file_path" => saved_file_path, "offset_seconds" => offset_seconds}} ->
+        file_index = resolve_file_index(channel.media, saved_file_path)
+        restored_offset = restore_offset_for_channel(channel, file_index, offset_seconds)
+        {file_index, restored_offset, state}
+
+      :error ->
+        updated_channel_state =
+          Map.put(state.channel_state, id, %{"file_path" => nil, "offset_seconds" => 0})
+
+        {0, 0, %{state | channel_state: updated_channel_state}}
+    end
+  end
+
+  def restore_offset_for_channel(channel, file_index, saved_offset_seconds) do
+    path = Enum.at(channel.media, file_index)
+
+    if PreparedMedia.image_file?(path) do
+      0
+    else
+      App.Util.normalize_offset(saved_offset_seconds)
+    end
+  end
+
+  def resolve_file_index(media, saved_file_path) when is_binary(saved_file_path),
+    do: Enum.find_index(media, &(&1 == saved_file_path)) || 0
+
+  def resolve_file_index(_media, _saved_file_path), do: 0
+
+  def persisted_resume_offset(offset_seconds),
+    do: max(App.Util.normalize_offset(offset_seconds) - @resume_rewind_seconds, 0)
+
+  def persist_state_file!(state) do
+    persisted = %{
+      "version" => 1,
+      "current_channel_id" => state.current_channel_id,
+      "channel_state" => state.channel_state
+    }
+
+    :ok = StateStore.save!(persisted)
+    state
+  end
+end
+
 defmodule App do
   use GenServer
   require Logger
 
   @preview_commit_ms 2000
-  @resume_rewind_seconds 3
   @slideshow_image_display_ms 10_000
 
   def main(argv) do
@@ -1095,15 +1259,16 @@ defmodule App do
         end
 
         current_channel =
-          Enum.find(channels, fn channel -> channel_id(channel) == saved_current_channel_id end) ||
-            List.first(channels)
+          Enum.find(channels, fn channel ->
+            App.Util.channel_id(channel) == saved_current_channel_id
+          end) || List.first(channels)
 
         init_state = %{
           mediadirs: mediadirs,
           catalog: catalog,
           channels: channels,
           current_channel: current_channel,
-          current_channel_id: channel_id(current_channel),
+          current_channel_id: App.Util.channel_id(current_channel),
           current_file_index: nil,
           current_player: nil,
           preview_channel: nil,
@@ -1139,7 +1304,7 @@ defmodule App do
       state
       |> Map.put(:runtime_sup, runtime_sup)
       |> Map.put(:screen_off?, false)
-      |> ensure_all_channel_state_entries()
+      |> App.Persistence.ensure_all_channel_state_entries()
 
     case Power.tv_on() do
       :ok ->
@@ -1154,7 +1319,8 @@ defmodule App do
         {:ok, state}
 
       channel ->
-        {file_index, offset_seconds, state} = load_or_initialize_channel_position(state, channel)
+        {file_index, offset_seconds, state} =
+          App.Persistence.load_or_initialize_channel_position(state, channel)
 
         case play_channel_item(state, channel, file_index, offset_seconds) do
           {:ok, new_state, actual_file_index} ->
@@ -1174,7 +1340,7 @@ defmodule App do
   @impl true
   def handle_info({:input_event, _dev, events}, state) when is_list(events) do
     state =
-      if state.screen_off? and wake_keypress?(events) do
+      if state.screen_off? and App.Util.wake_keypress?(events) do
         wake_screen(state)
       else
         Enum.reduce(events, state, fn
@@ -1233,23 +1399,23 @@ defmodule App do
   end
 
   def handle_info({:mpv_position, pid, seconds}, %{current_player: pid} = state) do
-    current_path = current_original_path(state)
+    current_path = App.Util.current_original_path(state)
 
     saved_offset_seconds =
       if PreparedMedia.image_file?(current_path) do
         0
       else
-        persisted_resume_offset(seconds)
+        App.Persistence.persisted_resume_offset(seconds)
       end
 
-    state = put_current_playhead(state, saved_offset_seconds)
+    state = App.Persistence.put_current_playhead(state, saved_offset_seconds)
     {:noreply, state}
   end
 
   def handle_info({:mpv_position, _pid, _seconds}, state), do: {:noreply, state}
 
   def handle_info({:mpv_end_of_file, pid, reason}, %{current_player: pid} = state) do
-    current_path = current_original_path(state)
+    current_path = App.Util.current_original_path(state)
 
     Logger.info(
       "mpv_end_of_file: pid=#{inspect(pid)} reason=#{inspect(reason)} current_path=#{inspect(current_path)} image?=#{PreparedMedia.image_file?(current_path)} display_elapsed?=#{inspect(state.display_elapsed?)} next_prepared?=#{not is_nil(state.next_prepared)}"
@@ -1311,7 +1477,7 @@ defmodule App do
 
   def handle_info(:image_display_expired, state) do
     Logger.info(
-      "image_display_expired: current_path=#{inspect(current_original_path(state))} current_index=#{inspect(state.current_file_index)} next_prepare_ref=#{inspect(state.next_prepare_ref)} next_prepared?=#{not is_nil(state.next_prepared)}"
+      "image_display_expired: current_path=#{inspect(App.Util.current_original_path(state))} current_index=#{inspect(state.current_file_index)} next_prepare_ref=#{inspect(state.next_prepare_ref)} next_prepared?=#{not is_nil(state.next_prepared)}"
     )
 
     state =
@@ -1368,7 +1534,7 @@ defmodule App do
       })
 
     state =
-      if PreparedMedia.image_file?(current_original_path(state)) do
+      if PreparedMedia.image_file?(App.Util.current_original_path(state)) do
         Logger.debug("prepared-next task down while image showing; trying maybe_advance")
         maybe_advance(state)
       else
@@ -1385,7 +1551,7 @@ defmodule App do
           %{state | preview_timer: nil, preview_active?: false}
 
         preview_channel ->
-          if same_channel?(preview_channel, state.current_channel) do
+          if App.Util.same_channel?(preview_channel, state.current_channel) do
             state
             |> Map.put(:preview_channel, nil)
             |> Map.put(:preview_timer, nil)
@@ -1394,11 +1560,13 @@ defmodule App do
             state =
               state
               |> clear_transition_state()
-              |> persist_current_channel_position()
+              |> App.Persistence.persist_current_channel_position()
 
             Logger.info("stopping current item before channel commit")
             state = stop_current_item(state)
-            {file_index, offset_seconds, state} = load_or_initialize_channel_position(state, preview_channel)
+
+            {file_index, offset_seconds, state} =
+              App.Persistence.load_or_initialize_channel_position(state, preview_channel)
 
             case play_channel_item(state, preview_channel, file_index, offset_seconds) do
               {:ok, state, actual_file_index} ->
@@ -1432,9 +1600,12 @@ defmodule App do
     state =
       state
       |> clear_transition_state()
-      |> persist_current_channel_position()
+      |> App.Persistence.persist_current_channel_position()
       |> stop_current_item()
-      |> then(fn s -> cancel_preview_timer(s.preview_timer); s end)
+      |> then(fn s ->
+        App.Util.cancel_preview_timer(s.preview_timer)
+        s
+      end)
 
     {:stop, :normal, state}
   end
@@ -1499,32 +1670,29 @@ defmodule App do
     |> Enum.sort_by(&{&1.root, &1.name, &1.path})
   end
 
-  defp wake_keypress?(events) do
-    Enum.any?(events, fn
-      {:ev_key, _key, 1} -> true
-      _ -> false
-    end)
-  end
-
   defp toggle_screen(%{screen_off?: true} = state), do: wake_screen(state)
   defp toggle_screen(state), do: turn_screen_off(state)
 
   defp turn_screen_off(state) do
-    state = persist_current_channel_position(state)
+    state = App.Persistence.persist_current_channel_position(state)
 
     case Power.tv_off() do
       :ok -> Logger.info("tv off")
       {:error, reason} -> Logger.error("tv off failed #{inspect(reason)}")
     end
 
-    Map.put(state, :screenoff?, true)
+    Map.put(state, :screen_off?, true)
   end
 
   defp cancel_active_preview(%{preview_active?: false} = state), do: state
 
   defp cancel_active_preview(state) do
-    cancel_preview_timer(state.preview_timer)
-    state |> Map.put(:preview_channel, nil) |> Map.put(:preview_timer, nil) |> Map.put(:preview_active?, false)
+    App.Util.cancel_preview_timer(state.preview_timer)
+
+    state
+    |> Map.put(:preview_channel, nil)
+    |> Map.put(:preview_timer, nil)
+    |> Map.put(:preview_active?, false)
   end
 
   defp wake_screen(state) do
@@ -1553,7 +1721,7 @@ defmodule App do
     state
     |> clear_transition_state()
     |> cancel_active_preview()
-    |> persist_current_channel_position()
+    |> App.Persistence.persist_current_channel_position()
     |> stop_current_item()
   end
 
@@ -1578,7 +1746,7 @@ defmodule App do
 
       channel ->
         {file_index, offset_seconds, state} =
-          load_or_initialize_channel_position(state, channel)
+          App.Persistence.load_or_initialize_channel_position(state, channel)
 
         Logger.info(
           "resume_playback: resuming channel=#{channel.label} " <>
@@ -1611,7 +1779,7 @@ defmodule App do
 
   defp preview_next_channel(%{channels: channels} = state) do
     base_channel = state.preview_channel || state.current_channel
-    current_index = current_channel_index(channels, base_channel)
+    current_index = App.Util.current_channel_index(channels, base_channel)
     next_index = rem(current_index + 1, length(channels))
     preview_channel(state, Enum.at(channels, next_index))
   end
@@ -1620,13 +1788,13 @@ defmodule App do
 
   defp preview_prev_channel(%{channels: channels} = state) do
     base_channel = state.preview_channel || state.current_channel
-    current_index = current_channel_index(channels, base_channel)
+    current_index = App.Util.current_channel_index(channels, base_channel)
     prev_index = rem(current_index - 1 + length(channels), length(channels))
     preview_channel(state, Enum.at(channels, prev_index))
   end
 
   defp preview_channel(state, channel) do
-    cancel_preview_timer(state.preview_timer)
+    App.Util.cancel_preview_timer(state.preview_timer)
     timer_ref = Process.send_after(self(), :commit_preview_channel, @preview_commit_ms)
 
     Osd.show(channel.name)
@@ -1643,7 +1811,7 @@ defmodule App do
   end
 
   defp maybe_advance(state) do
-    current_path = current_original_path(state)
+    current_path = App.Util.current_original_path(state)
     image? = PreparedMedia.image_file?(current_path)
 
     Logger.debug(
@@ -1708,7 +1876,7 @@ defmodule App do
 
   defp advance_current_channel_item(state) do
     channel = state.current_channel
-    requested_file_index = next_file_index(state.current_file_index, channel.media)
+    requested_file_index = App.Util.next_file_index(state.current_file_index, channel.media)
 
     Logger.info(
       "advance_current_channel_item: channel=#{channel.label} current_index=#{inspect(state.current_file_index)} requested_next_index=#{requested_file_index}"
@@ -1732,7 +1900,7 @@ defmodule App do
 
         state
         |> Map.put(:channel_state, updated_channel_state)
-        |> persist_state_file!()
+        |> App.Persistence.persist_state_file!()
 
       {:error, state, reason} ->
         Logger.error(
@@ -1758,7 +1926,7 @@ defmodule App do
             {:error, state, {:channel_unavailable, :empty_channel}}
 
           true ->
-            normalized_index = normalize_index(file_index, media)
+            normalized_index = App.Util.normalize_index(file_index, media)
 
             Logger.debug(
               "play_channel_item: channel available channel=#{channel.label} normalized_index=#{normalized_index}"
@@ -1827,7 +1995,7 @@ defmodule App do
           media,
           requested_index,
           offset_seconds,
-          next_file_index(candidate_index, media),
+          App.Util.next_file_index(candidate_index, media),
           attempts + 1,
           max_attempts
         )
@@ -1841,7 +2009,7 @@ defmodule App do
           media,
           requested_index,
           offset_seconds,
-          next_file_index(candidate_index, media),
+          App.Util.next_file_index(candidate_index, media),
           attempts + 1,
           max_attempts
         )
@@ -1853,7 +2021,7 @@ defmodule App do
               0
 
             candidate_index == requested_index ->
-              normalize_offset(offset_seconds)
+              App.Util.normalize_offset(offset_seconds)
 
             true ->
               0
@@ -1885,7 +2053,7 @@ defmodule App do
               media,
               requested_index,
               offset_seconds,
-              next_file_index(candidate_index, media),
+              App.Util.next_file_index(candidate_index, media),
               attempts + 1,
               max_attempts
             )
@@ -1900,23 +2068,24 @@ defmodule App do
       "start_current_item: channel=#{channel.label} index=#{file_index} actual_path=#{inspect(actual_path)} play_path=#{inspect(prepared.play_path)} startpos=#{inspect(startpos)} tmp?=#{inspect(prepared.tmp?)} downscaled?=#{inspect(prepared.downscaled?)}"
     )
 
-    with {:ok, playerpid} <- MpvPlayer.start_link(parent: self(), file: prepared.play_path, start_pos: startpos) do
+    with {:ok, playerpid} <-
+           MpvPlayer.start_link(parent: self(), file: prepared.play_path, start_pos: startpos) do
       updated_channel_state =
-        Map.put(state.channel_state, channel_id(channel), %{
-          file_path: actual_path,
-          offset_seconds: 0
+        Map.put(state.channel_state, App.Util.channel_id(channel), %{
+          "file_path" => actual_path,
+          "offset_seconds" => 0
         })
 
       new_state =
         state
         |> clear_transition_state()
         |> Map.put(:current_channel, channel)
-        |> Map.put(:current_channel_id, channel_id(channel))
+        |> Map.put(:current_channel_id, App.Util.channel_id(channel))
         |> Map.put(:current_file_index, file_index)
         |> Map.put(:current_player, playerpid)
         |> Map.put(:channel_state, updated_channel_state)
-        |> put_current_playhead(0)
-        |> persist_state_file!()
+        |> App.Persistence.put_current_playhead(0)
+        |> App.Persistence.persist_state_file!()
         |> maybe_start_image_display_timer(actual_path)
         |> maybe_prepare_next_item()
 
@@ -1942,7 +2111,7 @@ defmodule App do
 
   defp stop_current_item(state) do
     Logger.info(
-      "stop_current_item: player=#{inspect(state.current_player)} current_path=#{inspect(current_original_path(state))}"
+      "stop_current_item: player=#{inspect(state.current_player)} current_path=#{inspect(App.Util.current_original_path(state))}"
     )
 
     try do
@@ -1958,7 +2127,7 @@ defmodule App do
   end
 
   defp maybe_start_image_display_timer(state, path) do
-    cancel_image_display_timer(state.image_display_timer)
+    App.Util.cancel_image_display_timer(state.image_display_timer)
 
     if PreparedMedia.image_file?(path) do
       timer_ref = Process.send_after(self(), :image_display_expired, @slideshow_image_display_ms)
@@ -2002,13 +2171,13 @@ defmodule App do
 
       state
     else
-      next_index = next_file_index(state.current_file_index, media)
+      next_index = App.Util.next_file_index(state.current_file_index, media)
       next_path = Enum.at(media, next_index)
       owner = self()
       ref = make_ref()
 
       Logger.debug(
-        "maybe_prepare_next_item: starting async prepare next_index=#{next_index} next_path=#{inspect(next_path)} current_index=#{inspect(state.current_file_index)} current_path=#{inspect(current_original_path(state))} screen_off?=#{inspect(state.screen_off?)}"
+        "maybe_prepare_next_item: starting async prepare next_index=#{next_index} next_path=#{inspect(next_path)} current_index=#{inspect(state.current_file_index)} current_path=#{inspect(App.Util.current_original_path(state))} screen_off?=#{inspect(state.screen_off?)}"
       )
 
       task =
@@ -2033,7 +2202,7 @@ defmodule App do
 
   defp clear_transition_state(state) do
     Logger.debug(
-      "clear_transition_state: clearing image timer and prepared-next state current_path=#{inspect(current_original_path(state))}"
+      "clear_transition_state: clearing image timer and prepared-next state current_path=#{inspect(App.Util.current_original_path(state))}"
     )
 
     state
@@ -2060,135 +2229,12 @@ defmodule App do
   end
 
   defp cancel_image_timer_and_reset_gate(state) do
-    cancel_image_display_timer(state.image_display_timer)
+    App.Util.cancel_image_display_timer(state.image_display_timer)
 
     state
     |> Map.put(:image_display_timer, nil)
     |> Map.put(:display_elapsed?, false)
   end
-
-  defp cancel_image_display_timer(nil), do: :ok
-
-  defp cancel_image_display_timer(timer_ref) do
-    result = Process.cancel_timer(timer_ref)
-
-    Logger.debug(
-      "cancel_image_display_timer: timer_ref=#{inspect(timer_ref)} cancel_result=#{inspect(result)}"
-    )
-
-    result
-  end
-
-  defp persist_current_channel_position(%{current_channel: nil} = state), do: persist_state_file!(state)
-  defp persist_current_channel_position(%{current_channel_id: nil} = state), do: persist_state_file!(state)
-  defp persist_current_channel_position(%{current_file_index: idx} = state) when not is_integer(idx), do: persist_state_file!(state)
-
-  defp persist_current_channel_position(state), do: persist_state_file!(state)
-
-  defp put_current_playhead(%{current_channel: nil} = state, _offset_seconds), do: state
-  defp put_current_playhead(%{current_channel_id: nil} = state, _offset_seconds), do: state
-  defp put_current_playhead(%{current_file_index: idx} = state, _offset_seconds) when not is_integer(idx), do: state
-
-  defp put_current_playhead(state, offset_seconds) do
-    current_path = current_original_path(state)
-    normalized_offset =
-      if PreparedMedia.image_file?(current_path), do: 0, else: normalize_offset(offset_seconds)
-
-    Logger.debug(
-      "put_current_playhead: channel_id=#{inspect(state.current_channel_id)} file_index=#{inspect(state.current_file_index)} path=#{inspect(current_path)} offset_seconds=#{normalized_offset}"
-    )
-
-    updated_channel_state =
-      Map.put(state.channel_state, state.current_channel_id, %{
-        "file_path" => current_path,
-        "offset_seconds" => normalized_offset
-      })
-
-    %{state | channel_state: updated_channel_state}
-  end
-
-  defp ensure_all_channel_state_entries(state) do
-    channel_state =
-      Enum.reduce(state.channels, state.channel_state, fn channel, acc ->
-        Map.put_new(acc, channel_id(channel), %{"file_path" => nil, "offset_seconds" => 0})
-      end)
-
-    %{state | channel_state: channel_state}
-  end
-
-  defp load_or_initialize_channel_position(state, channel) do
-    id = channel_id(channel)
-
-    case Map.fetch(state.channel_state, id) do
-      {:ok, %{"file_path" => saved_file_path, "offset_seconds" => offset_seconds}} ->
-        file_index = resolve_file_index(channel.media, saved_file_path)
-        restored_offset = restore_offset_for_channel(channel, file_index, offset_seconds)
-        {file_index, restored_offset, state}
-
-      :error ->
-        updated_channel_state = Map.put(state.channel_state, id, %{"file_path" => nil, "offset_seconds" => 0})
-        {0, 0, %{state | channel_state: updated_channel_state}}
-    end
-  end
-
-  defp restore_offset_for_channel(channel, file_index, saved_offset_seconds) do
-    path = Enum.at(channel.media, file_index)
-    if PreparedMedia.image_file?(path), do: 0, else: normalize_offset(saved_offset_seconds)
-  end
-
-  defp resolve_file_index(media, saved_file_path) when is_binary(saved_file_path),
-    do: Enum.find_index(media, &(&1 == saved_file_path)) || 0
-
-  defp resolve_file_index(_media, _saved_file_path), do: 0
-
-  defp persisted_resume_offset(offset_seconds),
-    do: max(normalize_offset(offset_seconds) - @resume_rewind_seconds, 0)
-
-  defp persist_state_file!(state) do
-    persisted = %{"version" => 1, "current_channel_id" => state.current_channel_id, "channel_state" => state.channel_state}
-    :ok = StateStore.save!(persisted)
-    state
-  end
-
-  defp current_original_path(%{current_channel: nil}), do: nil
-  defp current_original_path(%{current_file_index: idx}) when not is_integer(idx), do: nil
-  defp current_original_path(state), do: Enum.at(state.current_channel.media, state.current_file_index)
-
-  defp channel_id(channel), do: channel.path
-
-  defp normalize_index(value, media) when is_integer(value) do
-    count = length(media)
-
-    cond do
-      count <= 0 -> 0
-      value >= 0 -> rem(value, count)
-      true -> 0
-    end
-  end
-
-  defp normalize_index(_value, _media), do: 0
-
-  defp next_file_index(current_index, media) when is_list(media) and media != [] do
-    rem(normalize_index(current_index, media) + 1, length(media))
-  end
-
-  defp next_file_index(_current_index, _media), do: 0
-
-  defp normalize_offset(value) when is_integer(value) and value >= 0, do: value
-  defp normalize_offset(value) when is_float(value) and value >= 0, do: trunc(value)
-  defp normalize_offset(_), do: 0
-
-  defp current_channel_index(channels, channel) do
-    Enum.find_index(channels, &same_channel?(&1, channel)) || 0
-  end
-
-  defp same_channel?(nil, nil), do: true
-  defp same_channel?(nil, _), do: false
-  defp same_channel?(_, nil), do: false
-  defp same_channel?(a, b), do: channel_id(a) == channel_id(b)
-
-  defp cancel_preview_timer(nil), do: :ok
-  defp cancel_preview_timer(timer_ref), do: Process.cancel_timer(timer_ref)
 
   defp usage(message) do
     IO.puts(message)
