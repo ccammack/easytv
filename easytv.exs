@@ -1531,7 +1531,9 @@ end
 defmodule App.Preview do
   require Logger
 
-  @preview_commit_ms 2000
+  @preview_commit_ms 500
+
+  # Public API
 
   def cancel_active_preview(%{preview_active?: false} = state), do: state
 
@@ -1546,7 +1548,7 @@ defmodule App.Preview do
     base_channel = state.preview_channel || state.current_channel
     current_index = App.Util.current_channel_index(channels, base_channel)
     next_index = rem(current_index + 1, length(channels))
-    start_preview(state, Enum.at(channels, next_index))
+    begin_channel_request(state, Enum.at(channels, next_index))
   end
 
   def preview_prev_channel(%{channels: []} = state), do: state
@@ -1555,35 +1557,23 @@ defmodule App.Preview do
     base_channel = state.preview_channel || state.current_channel
     current_index = App.Util.current_channel_index(channels, base_channel)
     prev_index = rem(current_index - 1 + length(channels), length(channels))
-    start_preview(state, Enum.at(channels, prev_index))
+    begin_channel_request(state, Enum.at(channels, prev_index))
   end
 
-  def start_preview(state, channel) do
-    App.Util.cancel_preview_timer(state.preview_timer)
-    timer_ref = Process.send_after(self(), :commit_preview, @preview_commit_ms)
-
-    Osd.show(channel.name)
-
-    state
-    |> Map.put(:preview_channel, channel)
-    |> Map.put(:preview_timer, timer_ref)
-    |> Map.put(:preview_active?, true)
+  # Called from handle_info(:commit_preview, ...)
+  def commit_preview(%{requested_channel: nil} = state) do
+    Logger.debug("commit_preview: no requested channel, clearing preview state")
+    clear_preview_state(state)
   end
 
-  def commit_preview(state) do
-    case state.preview_channel do
-      nil ->
-        clear_preview_state(state)
-
-      preview_channel ->
-        commit_preview(state, preview_channel)
-    end
-  end
-
-  defp commit_preview(state, preview_channel) do
-    if App.Util.same_channel?(preview_channel, state.current_channel) do
+  def commit_preview(%{requested_channel: requested_channel} = state) do
+    # If the requested channel is already current, just clear preview
+    if App.Util.same_channel?(requested_channel, state.current_channel) do
+      Logger.debug("commit_preview: requested channel already current, clearing preview state")
       clear_preview_state(state)
     else
+      Logger.info("commit_preview: committing requested channel=#{requested_channel.label}")
+
       state =
         state
         |> App.Advance.clear_transition_state()
@@ -1593,26 +1583,54 @@ defmodule App.Preview do
       state = App.Playback.stop_current_item(state)
 
       {file_index, offset_seconds, state} =
-        App.Persistence.load_or_initialize_channel_position(state, preview_channel)
+        App.Persistence.load_or_initialize_channel_position(state, requested_channel)
 
-      case App.Playback.play_channel_item(state, preview_channel, file_index, offset_seconds) do
+      case App.Playback.play_channel_item(state, requested_channel, file_index, offset_seconds) do
         {:ok, state, actual_file_index} ->
-          actual_path = Enum.at(preview_channel.media, actual_file_index)
-          Logger.info("committed channel: #{preview_channel.label}")
+          actual_path = Enum.at(requested_channel.media, actual_file_index)
+
+          Logger.info("committed channel: #{requested_channel.label}")
           Logger.info("resume position: file=#{inspect(actual_path)} offset=#{offset_seconds}s")
+
+          # After commit, set current_channel to the committed channel and clear preview/request state
+          state =
+            state
+            |> Map.put(:current_channel, requested_channel)
+            |> Map.put(:current_channel_id, App.Util.channel_id(requested_channel))
 
           clear_preview_state(state)
 
         {:error, state, reason} ->
-          Logger.error("failed to commit #{preview_channel.label}: #{inspect(reason)}")
+          Logger.error("failed to commit #{requested_channel.label}: #{inspect(reason)}")
           clear_preview_state(state)
       end
     end
   end
 
+  # Internal helpers
+
+  # Start / update a channel request: show OSD immediately, remember request, arm debounce timer.
+  defp begin_channel_request(state, channel) do
+    App.Util.cancel_preview_timer(state.preview_timer)
+    timer_ref = Process.send_after(self(), :commit_preview, @preview_commit_ms)
+
+    Osd.show(channel.name)
+
+    Logger.debug(
+      "begin_channel_request: requested_channel=#{channel.label} timer_ref=#{inspect(timer_ref)}"
+    )
+
+    state
+    |> Map.put(:preview_channel, channel)
+    |> Map.put(:requested_channel, channel)
+    |> Map.put(:preview_timer, timer_ref)
+    |> Map.put(:preview_active?, true)
+  end
+
   defp clear_preview_state(state) do
     state
     |> Map.put(:preview_channel, nil)
+    |> Map.put(:requested_channel, nil)
     |> Map.put(:preview_timer, nil)
     |> Map.put(:preview_active?, false)
   end
@@ -2140,6 +2158,7 @@ defmodule App do
       current_file_index: nil,
       current_player: nil,
       preview_channel: nil,
+      requested_channel: nil,
       preview_timer: nil,
       preview_active?: false,
       screen_off?: false,
