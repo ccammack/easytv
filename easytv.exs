@@ -159,10 +159,10 @@ defmodule JsonFileStore do
       {:ok, contents} ->
         case Jason.decode(contents) do
           {:ok, data} ->
-            validate!.(data)
+             validate!.(data)
 
           {:error, reason} ->
-            raise "Could not parse #{label} #{path}: #{inspect(reason)}"
+             raise "Could not parse #{label} #{path}: #{inspect(reason)}"
         end
 
       {:error, :enoent} ->
@@ -175,14 +175,39 @@ defmodule JsonFileStore do
 
   def save!(path, data, validate!) when is_binary(path) and is_function(validate!, 1) do
     validate!.(data)
-    File.mkdir_p!(Path.dirname(path))
+    dir = Path.dirname(path)
+    File.mkdir_p!(dir)
 
     json = Jason.encode_to_iodata!(data, pretty: true)
     tmp = path <> ".tmp"
 
     File.write!(tmp, json)
-    File.rename!(tmp, path)
-    :ok
+    case File.rename(tmp, path) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        # Log and keep going instead of crashing the whole app
+        IO.puts(
+          "JsonFileStore.save!: rename failed from #{tmp} to #{path}: #{inspect(reason)}"
+        )
+
+        # Best-effort fallback: try a second time after re-creating dir
+        File.mkdir_p!(dir)
+
+        case File.rename(tmp, path) do
+          :ok ->
+            :ok
+
+          {:error, reason2} ->
+            IO.puts(
+              "JsonFileStore.save!: second rename failed from #{tmp} to #{path}: #{inspect(reason2)}"
+            )
+
+            # Leave the .tmp file; caller can decide if this is fatal
+            :error
+        end
+    end
   end
 end
 
@@ -545,6 +570,14 @@ defmodule MpvPlayer do
         _ -> nil
       end
 
+    Logger.warning(
+      "mpv init: wrapper_pid=#{inspect(self())} parent=#{inspect(parent)} port=#{inspect(port)} port_os_pid=#{inspect(port_os_pid)} socket_path=#{socket_path} file=#{inspect(file)} start_pos=#{inspect(start_pos)}"
+    )
+
+    if port_os_pid do
+      log_process_snapshot("mpv init process snapshot", port_os_pid)
+    end
+
     state = %State{
       parent: parent,
       port: port,
@@ -561,8 +594,17 @@ defmodule MpvPlayer do
 
     case connect_until(socket_path, @startup_timeout_ms) do
       {:ok, socket} ->
-        Logger.info("mpv started os_pid=#{inspect(port_os_pid)} socket=#{socket_path}")
-        send_event(state, :started, %{os_pid: port_os_pid, socket_path: socket_path, file: file})
+        Logger.info(
+          "mpv started wrapper_pid=#{inspect(self())} port=#{inspect(port)} os_pid=#{inspect(port_os_pid)} socket=#{socket_path}"
+        )
+
+        send_event(state, :started, %{
+          os_pid: port_os_pid,
+          socket_path: socket_path,
+          file: file,
+          wrapper_pid: self(),
+          port: inspect(port)
+        })
 
         state = %{state | socket: socket, connected?: true}
         state = send_observe_property(state, 2, "pause")
@@ -571,7 +613,10 @@ defmodule MpvPlayer do
         {:ok, state}
 
       {:error, reason} ->
-        Logger.error("failed to connect to mpv ipc: #{inspect(reason)}")
+        Logger.error(
+          "failed to connect to mpv ipc wrapper_pid=#{inspect(self())} port=#{inspect(port)} os_pid=#{inspect(port_os_pid)} reason=#{inspect(reason)}"
+        )
+
         send_event(state, :ipc_error, %{stage: :connect, reason: inspect(reason)})
         {:stop, {:ipc_connect_failed, reason}, state}
     end
@@ -588,19 +633,50 @@ defmodule MpvPlayer do
     {:reply, result, state}
   end
 
+  def handle_call(:stop, _from, %{stopping?: true} = state) do
+    Logger.warning(
+      "mpv stop: already stopping wrapper_pid=#{inspect(self())} port=#{inspect(state.port)} os_pid=#{inspect(state.port_os_pid)} file=#{inspect(state.file)}"
+    )
+
+    {:reply, {:ok, :already_stopping}, state}
+  end
+
   def handle_call(:stop, from, state) do
-    {result, state} = send_command(state, ["quit"], :stop)
+    state = %{state | stopping?: true, stop_from: from}
 
-    case result do
-      {:ok, _request_id} ->
-        {:noreply, %{state | stopping?: true, stop_from: from}}
+    Logger.warning(
+      "mpv stop: begin wrapper_pid=#{inspect(self())} port=#{inspect(state.port)} os_pid=#{inspect(state.port_os_pid)} socket=#{inspect(state.socket_path)} connected?=#{inspect(state.connected?)} file=#{inspect(state.file)}"
+    )
 
-      {:error, _reason} ->
-        {:reply, result, %{state | stopping?: true}}
+    if state.port_os_pid do
+      log_process_snapshot("mpv stop before kill", state.port_os_pid)
     end
+
+    force_kill_port_os_pid(state)
+
+    if state.port_os_pid do
+      log_process_snapshot("mpv stop after kill", state.port_os_pid)
+    end
+
+    if state.stop_from do
+      GenServer.reply(state.stop_from, :ok)
+    end
+
+    {:stop, :normal, %{state | stop_from: nil}}
   end
 
   @impl true
+  def handle_info(:force_kill_if_needed, %{stopping?: true} = state) do
+    Logger.warning(
+      "mpv stop grace expired; force killing os_pid=#{inspect(state.port_os_pid)} file=#{inspect(state.file)}"
+    )
+
+    force_kill_port_os_pid(state)
+    {:noreply, state}
+  end
+
+  def handle_info(:force_kill_if_needed, state), do: {:noreply, state}
+
   def handle_info(:poll_status, state) do
     if state.connected? and not state.stopping? do
       {_result, state} = send_command(state, ["get_property", "time-pos"], :poll_time_pos)
@@ -634,8 +710,9 @@ defmodule MpvPlayer do
 
         state =
           if tag == :stop and state.stop_from do
-            GenServer.reply(state.stop_from, {:error, :timeout})
-            %{state | stop_from: nil}
+            Logger.warning("mpv stop request timed out; forcing kill")
+            force_kill_port_os_pid(state)
+            state
           else
             state
           end
@@ -656,7 +733,14 @@ defmodule MpvPlayer do
   end
 
   def handle_info({port, {:exit_status, status}}, %{port: port} = state) do
-    Logger.info("mpv exited with status #{status}")
+    Logger.warning(
+      "mpv exit_status: wrapper_pid=#{inspect(self())} port=#{inspect(port)} os_pid=#{inspect(state.port_os_pid)} status=#{status} stopping?=#{inspect(state.stopping?)} file=#{inspect(state.file)}"
+    )
+
+    if state.port_os_pid do
+      log_process_snapshot("mpv exit_status snapshot", state.port_os_pid)
+    end
+
     send_event(state, :process_exit, %{status: status, stopping?: state.stopping?})
 
     state =
@@ -687,9 +771,14 @@ defmodule MpvPlayer do
 
     state =
       if state.stop_from do
-        reply = if expected?, do: :ok, else: {:error, :ipc_closed}
-        GenServer.reply(state.stop_from, reply)
-        %{state | stop_from: nil}
+        # Do not reply here if we still have a live OS process; wait for exit_status when possible.
+        if state.port_os_pid do
+          state
+        else
+          reply = if expected?, do: :ok, else: {:error, :ipc_closed}
+          GenServer.reply(state.stop_from, reply)
+          %{state | stop_from: nil}
+        end
       else
         state
       end
@@ -703,8 +792,8 @@ defmodule MpvPlayer do
 
     state =
       if state.stop_from do
-        GenServer.reply(state.stop_from, {:error, reason})
-        %{state | stop_from: nil}
+        force_kill_port_os_pid(state)
+        state
       else
         state
       end
@@ -719,6 +808,20 @@ defmodule MpvPlayer do
 
   @impl true
   def terminate(reason, state) do
+    Logger.warning(
+      "MpvPlayer terminate: wrapper_pid=#{inspect(self())} reason=#{inspect(reason)} port=#{inspect(state.port)} os_pid=#{inspect(state.port_os_pid)} socket=#{inspect(state.socket_path)} stopping?=#{inspect(state.stopping?)} file=#{inspect(state.file)}"
+    )
+
+    if state.port_os_pid do
+      log_process_snapshot("terminate before cleanup", state.port_os_pid)
+    end
+
+    force_kill_port_os_pid(state)
+
+    if state.port_os_pid do
+      log_process_snapshot("terminate after cleanup", state.port_os_pid)
+    end
+
     if state.socket, do: safe_socket_close(state.socket)
 
     if state.socket_path do
@@ -729,8 +832,25 @@ defmodule MpvPlayer do
       end
     end
 
-    Logger.debug("MpvPlayer terminate: #{inspect(reason)}")
     :ok
+  end
+
+  defp log_process_snapshot(label, os_pid) do
+    try do
+      {output, status} =
+        System.cmd(
+          "ps",
+          ["-o", "pid,ppid,pgid,stat,etime,command=", "-p", Integer.to_string(os_pid)],
+          stderr_to_stdout: true
+        )
+
+      Logger.warning(
+        "#{label}: os_pid=#{os_pid} ps_status=#{status} ps_output=#{inspect(String.trim(output))}"
+      )
+    catch
+      kind, reason ->
+        Logger.warning("#{label}: os_pid=#{os_pid} ps raised #{inspect({kind, reason})}")
+    end
   end
 
   defp socket_path do
@@ -855,8 +975,7 @@ defmodule MpvPlayer do
             state = %{state | pending: pending}
 
             if tag == :stop and state.stop_from do
-              GenServer.reply(state.stop_from, :ok)
-              %{state | stop_from: nil}
+              state
             else
               state
             end
@@ -880,8 +999,7 @@ defmodule MpvPlayer do
             state = %{state | pending: pending}
 
             if tag == :stop and state.stop_from do
-              GenServer.reply(state.stop_from, :ok)
-              %{state | stop_from: nil}
+              state
             else
               state
             end
@@ -906,8 +1024,9 @@ defmodule MpvPlayer do
             state = %{state | pending: pending}
 
             if tag == :stop and state.stop_from do
-              GenServer.reply(state.stop_from, {:error, error})
-              %{state | stop_from: nil}
+              Logger.warning("mpv quit command returned error=#{inspect(error)}; forcing kill")
+              force_kill_port_os_pid(state)
+              state
             else
               state
             end
@@ -935,6 +1054,48 @@ defmodule MpvPlayer do
       :gen_tcp.close(socket)
     catch
       _, _ -> :ok
+    end
+
+    :ok
+  end
+
+  defp force_kill_port_os_pid(%{port_os_pid: nil} = state) do
+    Logger.warning(
+      "force_kill_port_os_pid: no os_pid wrapper_pid=#{inspect(self())} port=#{inspect(state.port)} file=#{inspect(state.file)}"
+    )
+
+    :ok
+  end
+
+  defp force_kill_port_os_pid(%{port: port, port_os_pid: os_pid} = state) do
+    Logger.warning(
+      "force_kill_port_os_pid: wrapper_pid=#{inspect(self())} port=#{inspect(port)} os_pid=#{inspect(os_pid)} file=#{inspect(state.file)}"
+    )
+
+    log_process_snapshot("force_kill pre", os_pid)
+
+    try do
+      {kill_output, kill_status} =
+        System.cmd("kill", ["-KILL", Integer.to_string(os_pid)], stderr_to_stdout: true)
+
+      Logger.warning(
+        "force_kill_port_os_pid: kill pid=#{os_pid} status=#{kill_status} output=#{inspect(kill_output)}"
+      )
+    catch
+      kind, reason ->
+        Logger.warning("force_kill_port_os_pid: kill raised #{inspect({kind, reason})}")
+    end
+
+    log_process_snapshot("force_kill post", os_pid)
+
+    if port do
+      try do
+        Logger.warning("force_kill_port_os_pid: closing port #{inspect(port)}")
+        Port.close(port)
+      catch
+        kind, reason ->
+          Logger.warning("force_kill_port_os_pid: Port.close raised #{inspect({kind, reason})}")
+      end
     end
 
     :ok
@@ -1183,8 +1344,15 @@ defmodule App.Persistence do
       "channel_state" => state.channel_state
     }
 
-    :ok = StateStore.save!(persisted)
-    state
+    case StateStore.save!(persisted) do
+      :ok ->
+        state
+
+      :error ->
+        # Do not crash playback; log and keep going
+        Logger.error("persist_state_file!: failed to save state.json; continuing without crash")
+        state
+    end
   end
 
   defp restore_saved_offset_for_channel(channel, file_index, saved_offset_seconds) do
@@ -1359,25 +1527,56 @@ defmodule App.Playback do
   end
 
   def stop_current_item(%{current_player: nil} = state) do
-    Logger.debug("stop_current_item: no current player")
+    Logger.debug(
+      "stop_current_item: no current player current_path=#{inspect(App.Util.current_original_path(state))}"
+    )
+
     state
   end
 
-  def stop_current_item(state) do
+  def stop_current_item(%{current_player: player} = state) do
     Logger.info(
-      "stop_current_item: player=#{inspect(state.current_player)} current_path=#{inspect(App.Util.current_original_path(state))}"
+      "stop_current_item: player=#{inspect(player)} current_path=#{inspect(App.Util.current_original_path(state))}"
     )
 
-    try do
-      MpvPlayer.stop(state.current_player)
-      Logger.debug("stop_current_item: stop request completed")
-    catch
-      :exit, reason ->
-        Logger.warning("stop_current_item: stop raised exit reason=#{inspect(reason)}")
-        :ok
+    result =
+      try do
+        MpvPlayer.stop(player)
+      catch
+        :exit, {:noproc, _} = reason ->
+          Logger.warning(
+            "stop_current_item: player already gone player=#{inspect(player)} reason=#{inspect(reason)}"
+          )
+
+          :ok
+
+        :exit, reason ->
+          Logger.warning(
+            "stop_current_item: stop raised exit player=#{inspect(player)} reason=#{inspect(reason)}"
+          )
+
+          {:error, reason}
+      end
+
+    case result do
+      :ok ->
+        Logger.debug("stop_current_item: player fully stopped player=#{inspect(player)}")
+
+      {:ok, :already_stopping} ->
+        Logger.debug("stop_current_item: player already stopping player=#{inspect(player)}")
+
+      {:error, reason} ->
+        Logger.warning(
+          "stop_current_item: stop returned error player=#{inspect(player)} reason=#{inspect(reason)}"
+        )
+
+      other ->
+        Logger.warning(
+          "stop_current_item: unexpected stop result player=#{inspect(player)} result=#{inspect(other)}"
+        )
     end
 
-    Map.put(state, :current_player, nil)
+    %{state | current_player: nil}
   end
 
   defp build_started_playback_state(state, channel, file_index, playerpid, actual_path) do
@@ -1560,64 +1759,106 @@ defmodule App.Preview do
     begin_channel_request(state, Enum.at(channels, prev_index))
   end
 
-  # Called from handle_info(:commit_preview, ...)
+  # Called from App.handle_info(:commit_preview, state)
   def commit_preview(%{requested_channel: nil} = state) do
     Logger.debug("commit_preview: no requested channel, clearing preview state")
     clear_preview_state(state)
   end
 
-  def commit_preview(%{requested_channel: requested_channel} = state) do
-    # If the requested channel is already current, just clear preview
+  def commit_preview(
+        %{requested_channel: requested_channel, request_seq: request_seq, switching?: false} =
+          state
+      ) do
     if App.Util.same_channel?(requested_channel, state.current_channel) do
       Logger.debug("commit_preview: requested channel already current, clearing preview state")
       clear_preview_state(state)
     else
-      Logger.info("commit_preview: committing requested channel=#{requested_channel.label}")
+      Logger.info(
+        "commit_preview: scheduling switch seq=#{request_seq} requested_channel=#{requested_channel.label}"
+      )
 
-      state =
-        state
-        |> App.Advance.clear_transition_state()
-        |> App.Persistence.persist_current_channel_position()
+      owner = self()
+      seq = request_seq
 
-      Logger.info("stopping current item before channel commit")
-      state = App.Playback.stop_current_item(state)
+      Task.start(fn ->
+        do_channel_switch(owner, seq, state, requested_channel)
+      end)
 
-      {file_index, offset_seconds, state} =
-        App.Persistence.load_or_initialize_channel_position(state, requested_channel)
-
-      case App.Playback.play_channel_item(state, requested_channel, file_index, offset_seconds) do
-        {:ok, state, actual_file_index} ->
-          actual_path = Enum.at(requested_channel.media, actual_file_index)
-
-          Logger.info("committed channel: #{requested_channel.label}")
-          Logger.info("resume position: file=#{inspect(actual_path)} offset=#{offset_seconds}s")
-
-          # After commit, set current_channel to the committed channel and clear preview/request state
-          state =
-            state
-            |> Map.put(:current_channel, requested_channel)
-            |> Map.put(:current_channel_id, App.Util.channel_id(requested_channel))
-
-          clear_preview_state(state)
-
-        {:error, state, reason} ->
-          Logger.error("failed to commit #{requested_channel.label}: #{inspect(reason)}")
-          clear_preview_state(state)
-      end
+      state
+      |> Map.put(:switching?, true)
+      |> Map.put(:switching_seq, seq)
     end
+  end
+
+  # If we get another :commit_preview while already switching, just leave it;
+  # the in-flight task will check request_seq when it returns.
+  def commit_preview(%{switching?: true} = state) do
+    Logger.debug(
+      "commit_preview: already switching seq=#{inspect(state.switching_seq)} request_seq=#{inspect(state.request_seq)}"
+    )
+
+    state
+  end
+
+  # Called from App.handle_info({:channel_switch_result, seq, result}, state)
+  def handle_switch_result(
+        %{switching_seq: seq, request_seq: seq, requested_channel: requested_channel},
+        {:ok, new_state}
+      ) do
+    Logger.info(
+      "handle_switch_result: applying switch seq=#{seq} requested_channel=#{requested_channel.label}"
+    )
+
+    new_state
+    |> Map.put(:switching?, false)
+    |> Map.put(:switching_seq, nil)
+    |> clear_preview_state()
+  end
+
+  def handle_switch_result(
+        %{switching_seq: seq, request_seq: current_seq} = state,
+        {:ok, new_state}
+      ) do
+    Logger.info(
+      "handle_switch_result: stale switch seq=#{seq} current_request_seq=#{current_seq}; scheduling next commit"
+    )
+
+    state =
+      new_state
+      |> Map.put(:preview_channel, state.preview_channel)
+      |> Map.put(:requested_channel, state.requested_channel)
+      |> Map.put(:preview_timer, state.preview_timer)
+      |> Map.put(:preview_active?, state.preview_active?)
+      |> Map.put(:request_seq, state.request_seq)
+      |> Map.put(:switching?, false)
+      |> Map.put(:switching_seq, nil)
+
+    maybe_schedule_followup_commit(state)
+    state
+  end
+
+  def handle_switch_result(state, {:error, reason}) do
+    Logger.error("handle_switch_result: channel switch failed #{inspect(reason)}")
+
+    state =
+      state
+      |> Map.put(:switching?, false)
+      |> Map.put(:switching_seq, nil)
+
+    maybe_schedule_followup_commit(state)
+    state
   end
 
   # Internal helpers
 
-  # Start / update a channel request: show OSD immediately, remember request, arm debounce timer.
-  defp begin_channel_request(state, channel) do
+  defp begin_channel_request(%{request_seq: seq} = state, channel) do
     App.Util.cancel_preview_timer(state.preview_timer)
     timer_ref = Process.send_after(self(), :commit_preview, @preview_commit_ms)
 
     Osd.show(channel.name)
 
     Logger.debug(
-      "begin_channel_request: requested_channel=#{channel.label} timer_ref=#{inspect(timer_ref)}"
+      "begin_channel_request: request_seq=#{seq + 1} requested_channel=#{channel.label} timer_ref=#{inspect(timer_ref)}"
     )
 
     state
@@ -1625,6 +1866,7 @@ defmodule App.Preview do
     |> Map.put(:requested_channel, channel)
     |> Map.put(:preview_timer, timer_ref)
     |> Map.put(:preview_active?, true)
+    |> Map.update!(:request_seq, &(&1 + 1))
   end
 
   defp clear_preview_state(state) do
@@ -1633,6 +1875,71 @@ defmodule App.Preview do
     |> Map.put(:requested_channel, nil)
     |> Map.put(:preview_timer, nil)
     |> Map.put(:preview_active?, false)
+  end
+
+  defp maybe_schedule_followup_commit(state) do
+    cond do
+      state.requested_channel == nil ->
+        :ok
+
+      App.Util.same_channel?(state.requested_channel, state.current_channel) ->
+        :ok
+
+      true ->
+        Process.send_after(self(), :commit_preview, 0)
+        :ok
+    end
+  end
+
+  defp do_channel_switch(owner, seq, state, requested_channel) do
+    try do
+      state =
+        state
+        |> App.Advance.clear_transition_state()
+        |> App.Persistence.persist_current_channel_position()
+
+      Logger.info(
+        "do_channel_switch: seq=#{seq} stopping current item before channel commit"
+      )
+
+      state = App.Playback.stop_current_item(state)
+
+      {file_index, offset_seconds, state} =
+        App.Persistence.load_or_initialize_channel_position(state, requested_channel)
+
+      case App.Playback.play_channel_item(state, requested_channel, file_index, offset_seconds) do
+        {:ok, new_state, actual_file_index} ->
+          actual_path = Enum.at(requested_channel.media, actual_file_index)
+
+          Logger.info("committed channel: #{requested_channel.label}")
+
+          Logger.info(
+            "resume position: file=#{inspect(actual_path)} offset=#{offset_seconds}s seq=#{seq}"
+          )
+
+          new_state =
+            new_state
+            |> Map.put(:current_channel, requested_channel)
+            |> Map.put(:current_channel_id, App.Util.channel_id(requested_channel))
+
+          send(owner, {:channel_switch_result, seq, {:ok, new_state}})
+          {:ok, new_state}
+
+        {:error, _new_state, reason} ->
+          Logger.error("failed to commit #{requested_channel.label}: #{inspect(reason)}")
+
+          send(owner, {:channel_switch_result, seq, {:error, reason}})
+          {:error, reason}
+      end
+    catch
+      kind, reason ->
+        Logger.error(
+          "do_channel_switch: raised #{inspect(kind)} #{inspect(reason)} seq=#{seq} requested_channel=#{requested_channel.label}"
+        )
+
+        send(owner, {:channel_switch_result, seq, {:error, {kind, reason}}})
+        {:error, {kind, reason}}
+    end
   end
 end
 
@@ -1715,12 +2022,20 @@ defmodule App.Advance do
     state
   end
 
+  def advance_current_channel_item(%{switching?: true} = state) do
+    Logger.info(
+      "advance_current_channel_item: skipping because channel switch is in progress current_channel=#{inspect(state.current_channel && state.current_channel.label)} current_index=#{inspect(state.current_file_index)} switching_seq=#{inspect(state.switching_seq)} request_seq=#{inspect(state.request_seq)}"
+    )
+
+    %{state | current_player: nil}
+  end
+
   def advance_current_channel_item(state) do
     channel = state.current_channel
     requested_file_index = App.Util.next_file_index(state.current_file_index, channel.media)
 
     Logger.info(
-      "advance_current_channel_item: channel=#{channel.label} current_index=#{inspect(state.current_file_index)} requested_next_index=#{requested_file_index}"
+      "advance_current_channel_item: channel=#{channel.label} current_index=#{inspect(state.current_file_index)} requested_next_index=#{requested_file_index} current_player=#{inspect(state.current_player)}"
     )
 
     state = App.Playback.stop_current_item(state)
@@ -1820,21 +2135,15 @@ defmodule App.Advance do
     |> Map.put(:display_elapsed?, false)
   end
 
-  defp clear_next_prepare(state) do
-    if state.next_prepare_task do
-      Logger.debug(
-        "clear_next_prepare: shutting down task ref=#{inspect(state.next_prepare_ref)} requested_index=#{inspect(state.next_requested_file_index)}"
-      )
+  def clear_next_prepare(%{next_prepare_task: nil} = state), do: state
 
-      Task.shutdown(state.next_prepare_task, :brutal_kill)
-    else
-      Logger.debug("clear_next_prepare: nothing to clear")
-    end
-
+  def clear_next_prepare(state) do
+    # Do not Task.await/shutdown here; this can be called from any process.
+    # Just drop the references from the state. The task will exit on its own.
     state
-    |> Map.put(:next_prepared, nil)
     |> Map.put(:next_prepare_task, nil)
     |> Map.put(:next_prepare_ref, nil)
+    |> Map.put(:next_prepared, nil)
     |> Map.put(:next_requested_file_index, nil)
   end
 
@@ -2008,6 +2317,14 @@ defmodule App do
 
   def handle_info({:mpv_position, _pid, _seconds}, state), do: {:noreply, state}
 
+  def handle_info({:mpv_end_of_file, pid, reason}, %{current_player: pid, switching?: true} = state) do
+    Logger.info(
+      "mpv_end_of_file: ignoring current-player eof during switch pid=#{inspect(pid)} reason=#{inspect(reason)}"
+    )
+
+    {:noreply, %{state | current_player: nil}}
+  end
+
   def handle_info({:mpv_end_of_file, pid, reason}, %{current_player: pid} = state) do
     current_path = App.Util.current_original_path(state)
 
@@ -2132,6 +2449,15 @@ defmodule App do
     {:noreply, App.Preview.commit_preview(state)}
   end
 
+  def handle_info({:channel_switch_result, seq, result}, state) do
+    Logger.debug(
+      "channel_switch_result: seq=#{inspect(seq)} result=#{inspect(elem(result, 0))} request_seq=#{inspect(state.request_seq)} switching_seq=#{inspect(state.switching_seq)}"
+    )
+
+    new_state = App.Preview.handle_switch_result(state, result)
+    {:noreply, new_state}
+  end
+
   def handle_info(:quit, state) do
     Logger.info("Q - quitting")
     Osd.clear()
@@ -2161,6 +2487,9 @@ defmodule App do
       requested_channel: nil,
       preview_timer: nil,
       preview_active?: false,
+      request_seq: 0,
+      switching?: false,
+      switching_seq: nil,
       screen_off?: false,
       channel_state: saved_channel_state,
       runtime_sup: nil,
