@@ -55,25 +55,95 @@ end
 
 defmodule MediaTypes do
   @audio_extensions MapSet.new([
-    ".mp3", ".flac", ".m4a", ".m4b", ".aac", ".ac3", ".ogg", ".oga", ".opus",
-    ".wav", ".aiff", ".alac", ".ape", ".amr", ".wma", ".wv", ".tta",
-    ".mp1", ".mp2", ".mpa", ".mid", ".midi", ".xm", ".it", ".s3m", ".mod",
-    ".ra", ".rmi", ".spx", ".voc"
-  ])
+                      ".mp3",
+                      ".flac",
+                      ".m4a",
+                      ".m4b",
+                      ".aac",
+                      ".ac3",
+                      ".ogg",
+                      ".oga",
+                      ".opus",
+                      ".wav",
+                      ".aiff",
+                      ".alac",
+                      ".ape",
+                      ".amr",
+                      ".wma",
+                      ".wv",
+                      ".tta",
+                      ".mp1",
+                      ".mp2",
+                      ".mpa",
+                      ".mid",
+                      ".midi",
+                      ".xm",
+                      ".it",
+                      ".s3m",
+                      ".mod",
+                      ".ra",
+                      ".rmi",
+                      ".spx",
+                      ".voc"
+                    ])
 
   @video_extensions MapSet.new([
-    ".rm", ".mp4", ".m4v", ".mkv", ".mov", ".avi", ".webm", ".flv", ".wmv",
-    ".mpg", ".mpeg", ".mpv", ".m1v", ".m2v", ".ts", ".m2ts", ".mts", ".vob",
-    ".ogv", ".ogm", ".3gp", ".3g2", ".asf", ".divx", ".dv", ".f4v", ".mxf",
-    ".nuv", ".rmvb", ".tod", ".trp", ".vro"
-  ])
+                      ".rm",
+                      ".mp4",
+                      ".m4v",
+                      ".mkv",
+                      ".mov",
+                      ".avi",
+                      ".webm",
+                      ".flv",
+                      ".wmv",
+                      ".mpg",
+                      ".mpeg",
+                      ".mpv",
+                      ".m1v",
+                      ".m2v",
+                      ".ts",
+                      ".m2ts",
+                      ".mts",
+                      ".vob",
+                      ".ogv",
+                      ".ogm",
+                      ".3gp",
+                      ".3g2",
+                      ".asf",
+                      ".divx",
+                      ".dv",
+                      ".f4v",
+                      ".mxf",
+                      ".nuv",
+                      ".rmvb",
+                      ".tod",
+                      ".trp",
+                      ".vro"
+                    ])
 
   @image_extensions MapSet.new([
-    ".jpg", ".jpeg", ".jpe", ".jfif", ".jif", ".png", ".gif", ".bmp", ".tif",
-    ".tiff", ".webp", ".ico", ".pbm", ".pgm", ".ppm", ".pnm", ".tga"
-  ])
+                      ".jpg",
+                      ".jpeg",
+                      ".jpe",
+                      ".jfif",
+                      ".jif",
+                      ".png",
+                      ".gif",
+                      ".bmp",
+                      ".tif",
+                      ".tiff",
+                      ".webp",
+                      ".ico",
+                      ".pbm",
+                      ".pgm",
+                      ".ppm",
+                      ".pnm",
+                      ".tga"
+                    ])
 
-  @media_extensions MapSet.union(@audio_extensions, @video_extensions) |> MapSet.union(@image_extensions)
+  @media_extensions MapSet.union(@audio_extensions, @video_extensions)
+                    |> MapSet.union(@image_extensions)
 
   def image_extensions, do: @image_extensions
   def media_extensions, do: @media_extensions
@@ -159,10 +229,10 @@ defmodule JsonFileStore do
       {:ok, contents} ->
         case Jason.decode(contents) do
           {:ok, data} ->
-             validate!.(data)
+            validate!.(data)
 
           {:error, reason} ->
-             raise "Could not parse #{label} #{path}: #{inspect(reason)}"
+            raise "Could not parse #{label} #{path}: #{inspect(reason)}"
         end
 
       {:error, :enoent} ->
@@ -182,15 +252,14 @@ defmodule JsonFileStore do
     tmp = path <> ".tmp"
 
     File.write!(tmp, json)
+
     case File.rename(tmp, path) do
       :ok ->
         :ok
 
       {:error, reason} ->
         # Log and keep going instead of crashing the whole app
-        IO.puts(
-          "JsonFileStore.save!: rename failed from #{tmp} to #{path}: #{inspect(reason)}"
-        )
+        IO.puts("JsonFileStore.save!: rename failed from #{tmp} to #{path}: #{inspect(reason)}")
 
         # Best-effort fallback: try a second time after re-creating dir
         File.mkdir_p!(dir)
@@ -256,11 +325,13 @@ defmodule StateStore do
     JsonFileStore.save!(state_path(), state_map, &validate_state!/1)
   end
 
-  def validate_state!(%{
-        "version" => @version,
-        "current_channel_id" => current_channel_id,
-        "channel_state" => channel_state
-      } = data)
+  def validate_state!(
+        %{
+          "version" => @version,
+          "current_channel_id" => current_channel_id,
+          "channel_state" => channel_state
+        } = data
+      )
       when (is_binary(current_channel_id) or is_nil(current_channel_id)) and is_map(channel_state),
       do: data
 
@@ -404,7 +475,14 @@ defmodule PreparedMedia do
       {output, status} =
         System.cmd(
           vipsthumbnail,
-          [tmp_source, "--size", "#{max_dim}x#{max_dim}", "--linear", "-o", "#{tmp_output}[Q=90]"],
+          [
+            tmp_source,
+            "--size",
+            "#{max_dim}x#{max_dim}",
+            "--linear",
+            "-o",
+            "#{tmp_output}[Q=90]"
+          ],
           stderr_to_stdout: true
         )
 
@@ -430,7 +508,8 @@ defmodule PreparedMedia do
     :ok
   end
 
-  defp sweep_tmp_dir(dir, keep_last) when is_binary(dir) and is_integer(keep_last) and keep_last >= 0 do
+  defp sweep_tmp_dir(dir, keep_last)
+       when is_binary(dir) and is_integer(keep_last) and keep_last >= 0 do
     case File.ls(dir) do
       {:ok, entries} ->
         entries
@@ -440,8 +519,12 @@ defmodule PreparedMedia do
         |> Enum.drop(keep_last)
         |> Enum.each(fn path ->
           case File.rm(path) do
-            :ok -> :ok
-            {:error, :enoent} -> :ok
+            :ok ->
+              :ok
+
+            {:error, :enoent} ->
+              :ok
+
             {:error, reason} ->
               Logger.debug(
                 "PreparedMedia sweep delete failed path=#{inspect(path)} reason=#{inspect(reason)}"
@@ -509,8 +592,12 @@ defmodule MpvPlayer do
     socket_path = socket_path()
 
     case File.rm(socket_path) do
-      :ok -> :ok
-      {:error, :enoent} -> :ok
+      :ok ->
+        :ok
+
+      {:error, :enoent} ->
+        :ok
+
       {:error, reason} ->
         Logger.warning("could not remove stale socket #{socket_path}: #{inspect(reason)}")
     end
@@ -695,9 +782,13 @@ defmodule MpvPlayer do
         # )
 
         if state.stopping? or state.switching? do
-          Logger.debug("mpv request timed out during stop/switch request_id=#{request_id} tag=#{inspect(tag)} age_ms=#{age_ms} command=#{inspect(command)}")
+          Logger.debug(
+            "mpv request timed out during stop/switch request_id=#{request_id} tag=#{inspect(tag)} age_ms=#{age_ms} command=#{inspect(command)}"
+          )
         else
-          Logger.error("mpv request timed out request_id=#{request_id} tag=#{inspect(tag)} age_ms=#{age_ms} command=#{inspect(command)}")
+          Logger.error(
+            "mpv request timed out request_id=#{request_id} tag=#{inspect(tag)} age_ms=#{age_ms} command=#{inspect(command)}"
+          )
         end
 
         send_event(state, :request_timeout, %{
@@ -814,7 +905,9 @@ defmodule MpvPlayer do
   end
 
   defp socket_path do
-    Script.tmp_file("mpv-player-#{System.os_time(:millisecond)}-#{:erlang.unique_integer([:positive])}.sock")
+    Script.tmp_file(
+      "mpv-player-#{System.os_time(:millisecond)}-#{:erlang.unique_integer([:positive])}.sock"
+    )
   end
 
   defp find_executable!(name) do
@@ -824,7 +917,12 @@ defmodule MpvPlayer do
   defp connect_until(_socket_path, remaining) when remaining <= 0, do: {:error, :timeout}
 
   defp connect_until(socket_path, remaining) do
-    case :gen_tcp.connect({:local, String.to_charlist(socket_path)}, 0, [:binary, active: :once], @connect_retry_ms) do
+    case :gen_tcp.connect(
+           {:local, String.to_charlist(socket_path)},
+           0,
+           [:binary, active: :once],
+           @connect_retry_ms
+         ) do
       {:ok, socket} ->
         {:ok, socket}
 
@@ -851,7 +949,8 @@ defmodule MpvPlayer do
 
     case :gen_tcp.send(state.socket, payload) do
       :ok ->
-        timer_ref = Process.send_after(self(), {:request_timeout, request_id}, @request_timeout_ms)
+        timer_ref =
+          Process.send_after(self(), {:request_timeout, request_id}, @request_timeout_ms)
 
         pending_entry = %{
           tag: tag,
@@ -880,7 +979,9 @@ defmodule MpvPlayer do
   end
 
   defp send_observe_property(state, id, name) do
-    {_result, state} = send_command(state, ["observe_property", id, name], {:observe_property, name})
+    {_result, state} =
+      send_command(state, ["observe_property", id, name], {:observe_property, name})
+
     state
   end
 
@@ -938,7 +1039,8 @@ defmodule MpvPlayer do
             state
         end
 
-      {:ok, %{"request_id" => request_id, "error" => "success"} = msg} when is_integer(request_id) ->
+      {:ok, %{"request_id" => request_id, "error" => "success"} = msg}
+      when is_integer(request_id) ->
         case Map.pop(state.pending, request_id) do
           {%{tag: tag, command: command, timer_ref: timer_ref}, pending} ->
             Process.cancel_timer(timer_ref)
@@ -1103,7 +1205,9 @@ defmodule RuntimeSupervisor do
     input_children =
       InputDevices.keyboard_paths()
       |> Enum.map(fn path ->
-        Supervisor.child_spec({InputDevice, [path: path, receiver: receiver]}, id: {:input_device, path})
+        Supervisor.child_spec({InputDevice, [path: path, receiver: receiver]},
+          id: {:input_device, path}
+        )
       end)
 
     children = input_children
@@ -1149,18 +1253,30 @@ defmodule Osd do
   require Logger
 
   @aosd_args [
-    "--position", "0",
-    "--x-offset", "32",
-    "--y-offset", "32",
-    "--padding", "16",
-    "--transparency", "0",
-    "--font", "monospace 24",
-    "--back-color", "black",
-    "--fore-color", "white",
-    "--fade-in", "0",
-    "--fade-full", "5000",
-    "--fade-out", "0",
-    "--lines", "1"
+    "--position",
+    "0",
+    "--x-offset",
+    "32",
+    "--y-offset",
+    "32",
+    "--padding",
+    "16",
+    "--transparency",
+    "0",
+    "--font",
+    "monospace 24",
+    "--back-color",
+    "black",
+    "--fore-color",
+    "white",
+    "--fade-in",
+    "0",
+    "--fade-full",
+    "5000",
+    "--fade-out",
+    "0",
+    "--lines",
+    "1"
   ]
 
   @kill_attempts [
@@ -1531,8 +1647,8 @@ defmodule Volume do
   # def increase, do: ScriptRunner.run("easytv-volume.sh", ["+"])
   # def decrease, do: ScriptRunner.run("easytv-volume.sh", ["-"])
   def toggle_mute, do: :ok
-  def increase, do:  :ok
-  def decrease, do:  :ok
+  def increase, do: :ok
+  def decrease, do: :ok
 end
 
 defmodule Power do
@@ -1554,7 +1670,9 @@ defmodule App.Util do
 
   def current_original_path(%{current_channel: nil}), do: nil
   def current_original_path(%{current_file_index: idx}) when not is_integer(idx), do: nil
-  def current_original_path(state), do: Enum.at(state.current_channel.media, state.current_file_index)
+
+  def current_original_path(state),
+    do: Enum.at(state.current_channel.media, state.current_file_index)
 
   def channel_id(channel), do: channel.path
 
@@ -1649,7 +1767,16 @@ defmodule App.Persistence do
       "put_current_playhead: channel_id=#{inspect(state.current_channel_id)} file_index=#{inspect(state.current_file_index)} path=#{inspect(current_path)} offset_seconds=#{normalized_offset}"
     )
 
-    %{state | channel_state: put_channel_position(state.channel_state, state.current_channel_id, current_path, normalized_offset)}
+    %{
+      state
+      | channel_state:
+          put_channel_position(
+            state.channel_state,
+            state.current_channel_id,
+            current_path,
+            normalized_offset
+          )
+    }
   end
 
   def ensure_all_channel_state_entries(state) do
@@ -1979,7 +2106,9 @@ defmodule App.Playback do
         case PreparedMedia.prepare_for_playback(path) do
           {:ok, prepared} ->
             startpos =
-              if PreparedMedia.image_file?(path), do: 0, else: App.Util.normalize_offset(offset_seconds)
+              if PreparedMedia.image_file?(path),
+                do: 0,
+                else: App.Util.normalize_offset(offset_seconds)
 
             case start_current_item(state, channel, candidate_index, prepared, startpos) do
               {:ok, state, actual_file_index} ->
@@ -2114,7 +2243,10 @@ defmodule App.Preview do
     |> clear_preview_state()
   end
 
-  def handle_switch_result(%{switching_seq: seq, request_seq: current_seq} = state, {:ok, new_state})
+  def handle_switch_result(
+        %{switching_seq: seq, request_seq: current_seq} = state,
+        {:ok, new_state}
+      )
       when seq != current_seq do
     new_state
     |> Map.put(:preview_channel, state.preview_channel)
@@ -2237,7 +2369,9 @@ defmodule App.Advance do
     end
   end
 
-  def advance_to_prepared_next(%{next_prepared: %{file_index: file_index, result: {:ok, prepared}}} = state) do
+  def advance_to_prepared_next(
+        %{next_prepared: %{file_index: file_index, result: {:ok, prepared}}} = state
+      ) do
     channel = state.current_channel
     actual_path = Enum.at(channel.media, file_index)
 
@@ -2256,7 +2390,10 @@ defmodule App.Advance do
         state
 
       {:error, reason} ->
-        Logger.error("failed starting prepared next item #{inspect(actual_path)} #{inspect(reason)}")
+        Logger.error(
+          "failed starting prepared next item #{inspect(actual_path)} #{inspect(reason)}"
+        )
+
         advance_current_channel_item(state)
     end
   end
@@ -2270,7 +2407,10 @@ defmodule App.Advance do
   end
 
   def advance_to_prepared_next(state) do
-    Logger.debug("advance_to_prepared_next no usable prepared item next_prepared=#{inspect(state.next_prepared)}")
+    Logger.debug(
+      "advance_to_prepared_next no usable prepared item next_prepared=#{inspect(state.next_prepared)}"
+    )
+
     state
   end
 
@@ -2539,7 +2679,10 @@ defmodule App.Input do
   end
 
   @impl true
-  def handle_info({:commit_preview, seq}, %{preview_session: %PreviewSession{seq: active_seq}} = state)
+  def handle_info(
+        {:commit_preview, seq},
+        %{preview_session: %PreviewSession{seq: active_seq}} = state
+      )
       when seq != active_seq do
     Logger.warning(
       "commit_preview ignored: stale_timer " <>
@@ -2563,7 +2706,10 @@ defmodule App.Input do
   end
 
   @impl true
-  def handle_info({:commit_preview, seq}, %{preview_session: %PreviewSession{seq: seq, switching?: true}} = state) do
+  def handle_info(
+        {:commit_preview, seq},
+        %{preview_session: %PreviewSession{seq: seq, switching?: true}} = state
+      ) do
     Logger.warning(
       "commit_preview ignored: already_switching " <>
         "seq=#{inspect(seq)} " <>
@@ -2586,7 +2732,10 @@ defmodule App.Input do
   end
 
   @impl true
-  def handle_info({:commit_preview, seq}, %{preview_session: %PreviewSession{seq: seq} = session} = state) do
+  def handle_info(
+        {:commit_preview, seq},
+        %{preview_session: %PreviewSession{seq: seq} = session} = state
+      ) do
     Logger.warning(
       "commit_preview handling " <>
         "seq=#{inspect(seq)} " <>
@@ -2618,7 +2767,10 @@ defmodule App.Input do
   end
 
   @impl true
-  def handle_info({:switch_result, seq, :ok, channel}, %{preview_session: %PreviewSession{seq: seq}} = state) do
+  def handle_info(
+        {:switch_result, seq, :ok, channel},
+        %{preview_session: %PreviewSession{seq: seq}} = state
+      ) do
     Logger.warning(
       "switch_result success " <>
         "seq=#{inspect(seq)} " <>
@@ -2634,7 +2786,10 @@ defmodule App.Input do
   end
 
   @impl true
-  def handle_info({:switch_result, seq, {:error, reason}, channel}, %{preview_session: %PreviewSession{seq: seq}} = state) do
+  def handle_info(
+        {:switch_result, seq, {:error, reason}, channel},
+        %{preview_session: %PreviewSession{seq: seq}} = state
+      ) do
     Logger.error(
       "channel switch failed " <>
         "seq=#{inspect(seq)} " <>
@@ -2771,7 +2926,8 @@ defmodule App.Input do
     %{state | preview_session: nil}
   end
 
-  defp cancel_preview_session_timer(%PreviewSession{timer_ref: timer_ref}) when not is_nil(timer_ref) do
+  defp cancel_preview_session_timer(%PreviewSession{timer_ref: timer_ref})
+       when not is_nil(timer_ref) do
     App.Util.cancel_preview_timer(timer_ref)
   end
 
@@ -2852,9 +3008,7 @@ defmodule App.PlaybackOwner do
 
   @impl true
   def handle_cast({:begin_switch, seq, channel}, state) do
-    Logger.warning(
-      "begin_switch seq=#{inspect(seq)} channel=#{inspect(channel && channel.name)}"
-    )
+    Logger.warning("begin_switch seq=#{inspect(seq)} channel=#{inspect(channel && channel.name)}")
 
     new_state =
       try do
@@ -2900,8 +3054,14 @@ defmodule App.PlaybackOwner do
 
   def handle_info({:mpv_position, _pid, _seconds}, state), do: {:noreply, state}
 
-  def handle_info({:mpv_end_of_file, pid, reason}, %{current_player: pid, switching?: true} = state) do
-    Logger.info("mpv_end_of_file ignoring current-player eof during switch pid=#{inspect(pid)} reason=#{inspect(reason)}")
+  def handle_info(
+        {:mpv_end_of_file, pid, reason},
+        %{current_player: pid, switching?: true} = state
+      ) do
+    Logger.info(
+      "mpv_end_of_file ignoring current-player eof during switch pid=#{inspect(pid)} reason=#{inspect(reason)}"
+    )
+
     {:noreply, %{state | current_player: nil}}
   end
 
@@ -3067,88 +3227,88 @@ end
 defmodule App do
   require Logger
 
-def main(argv) do
-  {opts, mediadirs, invalid} = OptionParser.parse(argv, strict: [scan: :boolean])
+  def main(argv) do
+    {opts, mediadirs, invalid} = OptionParser.parse(argv, strict: [scan: :boolean])
 
-  cond do
-    invalid != [] ->
-      usage("invalid options: #{inspect(invalid)}")
+    cond do
+      invalid != [] ->
+        usage("invalid options: #{inspect(invalid)}")
 
-    mediadirs == [] ->
-      usage("missing media dirs")
+      mediadirs == [] ->
+        usage("missing media dirs")
 
-    true ->
-      mediadirs = mediadirs |> Enum.map(&Path.expand/1) |> Enum.uniq()
-      scan? = Keyword.get(opts, :scan, false)
+      true ->
+        mediadirs = mediadirs |> Enum.map(&Path.expand/1) |> Enum.uniq()
+        scan? = Keyword.get(opts, :scan, false)
 
-      saved_state = StateStore.load!()
-      saved_channel_state = Map.fetch!(saved_state, "channel_state")
-      saved_current_channel_id = Map.fetch!(saved_state, "current_channel_id")
+        saved_state = StateStore.load!()
+        saved_channel_state = Map.fetch!(saved_state, "channel_state")
+        saved_current_channel_id = Map.fetch!(saved_state, "current_channel_id")
 
-      catalog = load_or_build_catalog!(mediadirs, scan?)
-      channels = active_channels_for_roots(catalog, mediadirs)
+        catalog = load_or_build_catalog!(mediadirs, scan?)
+        channels = active_channels_for_roots(catalog, mediadirs)
 
-      if channels == [] do
-        usage("no playable media found in supplied media dirs")
-      end
+        if channels == [] do
+          usage("no playable media found in supplied media dirs")
+        end
 
-      current_channel =
-        Enum.find(channels, fn channel ->
-          App.Util.channel_id(channel) == saved_current_channel_id
-        end) || List.first(channels)
+        current_channel =
+          Enum.find(channels, fn channel ->
+            App.Util.channel_id(channel) == saved_current_channel_id
+          end) || List.first(channels)
 
-      case Power.tv_on() do
-        :ok ->
-          Logger.info("main: tv on")
+        case Power.tv_on() do
+          :ok ->
+            Logger.info("main: tv on")
 
-        {:error, reason} ->
-          Logger.error("main: tv on failed #{inspect(reason)}")
-      end
+          {:error, reason} ->
+            Logger.error("main: tv on failed #{inspect(reason)}")
+        end
 
-      case Osd.start_link() do
-        {:ok, _osd_pid} -> :ok
-        {:error, {:already_started, _pid}} -> :ok
-      end
+        case Osd.start_link() do
+          {:ok, _osd_pid} -> :ok
+          {:error, {:already_started, _pid}} -> :ok
+        end
 
-      {:ok, input_pid} =
-        App.Input.start_link(
-          name: App.Input,
-          channels: channels,
-          current_channel: current_channel,
-          playback_owner: nil
-        )
+        {:ok, input_pid} =
+          App.Input.start_link(
+            name: App.Input,
+            channels: channels,
+            current_channel: current_channel,
+            playback_owner: nil
+          )
 
-      {:ok, playback_owner} =
-        App.PlaybackOwner.start_link(
-          name: App.PlaybackOwner,
-          input_pid: input_pid,
-          current_channel: current_channel,
-          channel_state: saved_channel_state,
-          channels: channels
-        )
+        {:ok, playback_owner} =
+          App.PlaybackOwner.start_link(
+            name: App.PlaybackOwner,
+            input_pid: input_pid,
+            current_channel: current_channel,
+            channel_state: saved_channel_state,
+            channels: channels
+          )
 
-      :sys.replace_state(App.Input, fn state ->
-        %{state | playback_owner: playback_owner}
-      end)
+        :sys.replace_state(App.Input, fn state ->
+          %{state | playback_owner: playback_owner}
+        end)
 
-      {:ok, runtime_sup} = RuntimeSupervisor.start_link(receiver: input_pid)
+        {:ok, runtime_sup} = RuntimeSupervisor.start_link(receiver: input_pid)
 
-      ref1 = Process.monitor(input_pid)
-      ref2 = Process.monitor(playback_owner)
-      ref3 = Process.monitor(runtime_sup)
+        ref1 = Process.monitor(input_pid)
+        ref2 = Process.monitor(playback_owner)
+        ref3 = Process.monitor(runtime_sup)
 
-      receive do
-        {:DOWN, ^ref1, :process, ^input_pid, reason} ->
-          Logger.error("App.Input exited: #{inspect(reason)}")
+        receive do
+          {:DOWN, ^ref1, :process, ^input_pid, reason} ->
+            Logger.error("App.Input exited: #{inspect(reason)}")
 
-        {:DOWN, ^ref2, :process, ^playback_owner, reason} ->
-          Logger.error("App.PlaybackOwner exited: #{inspect(reason)}")
+          {:DOWN, ^ref2, :process, ^playback_owner, reason} ->
+            Logger.error("App.PlaybackOwner exited: #{inspect(reason)}")
 
-        {:DOWN, ^ref3, :process, ^runtime_sup, reason} ->
-          Logger.error("RuntimeSupervisor exited: #{inspect(reason)}")
-      end
+          {:DOWN, ^ref3, :process, ^runtime_sup, reason} ->
+            Logger.error("RuntimeSupervisor exited: #{inspect(reason)}")
+        end
+    end
   end
-end
 
   defp load_or_build_catalog!(mediadirs, true) do
     catalog =
