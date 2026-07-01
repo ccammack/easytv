@@ -279,7 +279,7 @@ defmodule PreparedMedia do
   @max_image_dimension 1920
   @keep_last_files 4
 
-  def prepare(path) when is_binary(path) do
+  def prepare_for_playback(path) when is_binary(path) do
     abspath = Path.expand(path)
 
     if image_file?(abspath) do
@@ -690,9 +690,15 @@ defmodule MpvPlayer do
       {%{tag: tag, command: command, sent_at_ms: sent_at_ms}, pending} ->
         age_ms = System.monotonic_time(:millisecond) - sent_at_ms
 
-        Logger.error(
-          "mpv request timed out request_id=#{request_id} tag=#{inspect(tag)} age_ms=#{age_ms} command=#{inspect(command)}"
-        )
+        # Logger.error(
+        #   "mpv request timed out request_id=#{request_id} tag=#{inspect(tag)} age_ms=#{age_ms} command=#{inspect(command)}"
+        # )
+
+        if state.stopping? or state.switching? do
+          Logger.debug("mpv request timed out during stop/switch request_id=#{request_id} tag=#{inspect(tag)} age_ms=#{age_ms} command=#{inspect(command)}")
+        else
+          Logger.error("mpv request timed out request_id=#{request_id} tag=#{inspect(tag)} age_ms=#{age_ms} command=#{inspect(command)}")
+        end
 
         send_event(state, :request_timeout, %{
           request_id: request_id,
@@ -1053,6 +1059,8 @@ defmodule InputDevice do
 end
 
 defmodule InputDevices do
+  require Logger
+
   def keyboard_paths do
     by_id_paths =
       "/dev/input/by-id/*-event-kbd"
@@ -1076,6 +1084,7 @@ defmodule InputDevices do
       raise "No keyboard input devices found."
     end
 
+    Logger.warning("keyboard_paths=#{inspect(paths)}")
     paths
   end
 end
@@ -1136,24 +1145,401 @@ defmodule ScriptRunner do
 end
 
 defmodule Osd do
-  def show(text) when is_binary(text) do
-    ScriptRunner.run("easytv-osd.sh", [text])
+  use GenServer
+  require Logger
+
+  @aosd_args [
+    "--position", "0",
+    "--x-offset", "32",
+    "--y-offset", "32",
+    "--padding", "16",
+    "--transparency", "0",
+    "--font", "monospace 24",
+    "--back-color", "black",
+    "--fore-color", "white",
+    "--fade-in", "0",
+    "--fade-full", "5000",
+    "--fade-out", "0",
+    "--lines", "1"
+  ]
+
+  @kill_attempts [
+    {"-TERM", 20},
+    {"-TERM", 40},
+    {"-KILL", 0}
+  ]
+
+  def start_link(opts \\ []) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  def show(message) when is_binary(message) do
+    GenServer.cast(__MODULE__, {:show, message})
   end
 
   def clear do
-    ScriptRunner.run("easytv-osd.sh", [])
+    GenServer.cast(__MODULE__, :clear)
   end
+
+  @impl true
+  def init(_opts) do
+    {:ok, %{instances: []}}
+  end
+
+  @impl true
+  def handle_cast({:show, ""}, state) do
+    Logger.warning(
+      "osd handle_cast show_empty " <>
+        "instances_count=#{length(state.instances)}"
+    )
+
+    instances = kill_all(state.instances)
+
+    Logger.warning(
+      "osd handle_cast show_empty done " <>
+        "remaining_instances=#{length(instances)}"
+    )
+
+    {:noreply, %{state | instances: instances}}
+  end
+
+  @impl true
+  def handle_cast({:show, message}, state) do
+    Logger.warning(
+      "osd handle_cast show " <>
+        "message=#{inspect(message)} " <>
+        "instances_count=#{length(state.instances)}"
+    )
+
+    instances = kill_all(state.instances)
+
+    Logger.warning(
+      "osd handle_cast show after_kill_all " <>
+        "message=#{inspect(message)} " <>
+        "survivor_count=#{length(instances)}"
+    )
+
+    case start_instance(message) do
+      {:ok, instance} ->
+        Logger.warning(
+          "osd start os_pid=#{inspect(instance.os_pid)} pgid=#{inspect(instance.pgid)} message=#{inspect(message)}"
+        )
+
+        new_instances = [instance | instances]
+
+        Logger.warning(
+          "osd handle_cast show done " <>
+            "message=#{inspect(message)} " <>
+            "instances_count=#{length(new_instances)}"
+        )
+
+        {:noreply, %{state | instances: new_instances}}
+
+      {:error, reason} ->
+        Logger.error(
+          "osd start failed " <>
+            "message=#{inspect(message)} " <>
+            "reason=#{inspect(reason)}"
+        )
+
+        {:noreply, %{state | instances: instances}}
+    end
+  end
+
+  @impl true
+  def handle_cast(:clear, state) do
+    Logger.warning(
+      "osd handle_cast clear " <>
+        "instances_count=#{length(state.instances)}"
+    )
+
+    instances = kill_all(state.instances)
+
+    Logger.warning(
+      "osd handle_cast clear done " <>
+        "remaining_instances=#{length(instances)}"
+    )
+
+    {:noreply, %{state | instances: instances}}
+  end
+
+  @impl true
+  def handle_info({port, {:exit_status, status}}, state) do
+    Logger.warning(
+      "osd port exit " <>
+        "port=#{inspect(port)} " <>
+        "status=#{inspect(status)} " <>
+        "instances_before=#{length(state.instances)}"
+    )
+
+    instances =
+      Enum.reject(state.instances, fn instance ->
+        instance.port == port
+      end)
+
+    Logger.warning(
+      "osd port exit pruned " <>
+        "port=#{inspect(port)} " <>
+        "instances_after=#{length(instances)}"
+    )
+
+    {:noreply, %{state | instances: instances}}
+  end
+
+  @impl true
+  def handle_info({:EXIT, port, reason}, state) when is_port(port) do
+    Logger.warning(
+      "osd port linked exit " <>
+        "port=#{inspect(port)} " <>
+        "reason=#{inspect(reason)} " <>
+        "instances_before=#{length(state.instances)}"
+    )
+
+    instances =
+      Enum.reject(state.instances, fn instance ->
+        instance.port == port
+      end)
+
+    Logger.warning(
+      "osd port linked exit pruned " <>
+        "port=#{inspect(port)} " <>
+        "instances_after=#{length(instances)}"
+    )
+
+    {:noreply, %{state | instances: instances}}
+  end
+
+  @impl true
+  def handle_info(msg, state) do
+    Logger.warning("osd handle_info other msg=#{inspect(msg)}")
+    {:noreply, state}
+  end
+
+  defp start_instance(message) do
+    case System.find_executable("aosd_cat") do
+      nil ->
+        Logger.error("osd start_instance aosd_cat_not_found")
+        {:error, :aosd_cat_not_found}
+
+      aosd_cat ->
+        Logger.warning(
+          "osd start_instance opening_port " <>
+            "executable=#{inspect(aosd_cat)} " <>
+            "message=#{inspect(message)}"
+        )
+
+        port =
+          Port.open({:spawn_executable, aosd_cat}, [
+            :binary,
+            :use_stdio,
+            :hide,
+            :exit_status,
+            {:args, @aosd_args}
+          ])
+
+        os_pid =
+          case Port.info(port, :os_pid) do
+            {:os_pid, pid} when is_integer(pid) -> pid
+            _ -> nil
+          end
+
+        pgid = get_pgid(os_pid)
+
+        Logger.warning(
+          "osd start_instance port_opened " <>
+            "port=#{inspect(port)} " <>
+            "os_pid=#{inspect(os_pid)} " <>
+            "pgid=#{inspect(pgid)} " <>
+            "message=#{inspect(message)}"
+        )
+
+        case Port.command(port, message <> "\n") do
+          true ->
+            Logger.warning(
+              "osd start_instance command_sent " <>
+                "port=#{inspect(port)} " <>
+                "message=#{inspect(message)}"
+            )
+
+            {:ok, %{port: port, os_pid: os_pid, pgid: pgid, message: message}}
+
+          false ->
+            Logger.error(
+              "osd start_instance command_failed " <>
+                "port=#{inspect(port)} " <>
+                "message=#{inspect(message)}"
+            )
+
+            safe_close_port(port)
+            {:error, :port_command_failed}
+        end
+    end
+  end
+
+  defp kill_all(instances) do
+    Logger.warning("osd kill_all begin instances_count=#{length(instances)}")
+
+    survivors =
+      instances
+      |> Enum.reverse()
+      |> Enum.reduce([], fn instance, acc ->
+        if kill_instance(instance) do
+          acc
+        else
+          [instance | acc]
+        end
+      end)
+
+    Logger.warning(
+      "osd kill_all done " <>
+        "instances_before=#{length(instances)} " <>
+        "survivor_count=#{length(survivors)}"
+    )
+
+    survivors
+  end
+
+  defp kill_instance(%{port: port, os_pid: os_pid, pgid: pgid, message: message} = instance) do
+    target =
+      cond do
+        is_integer(pgid) and pgid > 0 -> {-pgid, "pgid"}
+        is_integer(os_pid) and os_pid > 0 -> {os_pid, "pid"}
+        true -> {nil, "none"}
+      end
+
+    case target do
+      {nil, _} ->
+        Logger.warning(
+          "osd kill no_target " <>
+            "message=#{inspect(message)} " <>
+            "port=#{inspect(port)} " <>
+            "os_pid=#{inspect(os_pid)} " <>
+            "pgid=#{inspect(pgid)}"
+        )
+
+        safe_close_port(port)
+        true
+
+      {kill_target, target_kind} ->
+        Logger.warning(
+          "osd kill begin " <>
+            "message=#{inspect(message)} " <>
+            "target_kind=#{target_kind} " <>
+            "target=#{inspect(kill_target)} " <>
+            "os_pid=#{inspect(os_pid)} " <>
+            "pgid=#{inspect(pgid)}"
+        )
+
+        Enum.each(@kill_attempts, fn {signal, sleep_ms} ->
+          Logger.warning(
+            "osd kill attempt " <>
+              "message=#{inspect(message)} " <>
+              "signal=#{inspect(signal)} " <>
+              "target=#{inspect(kill_target)} " <>
+              "sleep_ms=#{inspect(sleep_ms)}"
+          )
+
+          _ = System.cmd("kill", [signal, Integer.to_string(kill_target)], stderr_to_stdout: true)
+
+          if sleep_ms > 0 do
+            Process.sleep(sleep_ms)
+          end
+        end)
+
+        dead? =
+          cond do
+            is_integer(pgid) and pgid > 0 ->
+              not alive_by_group?(pgid)
+
+            is_integer(os_pid) and os_pid > 0 ->
+              not alive_by_pid?(os_pid)
+
+            true ->
+              true
+          end
+
+        safe_close_port(port)
+
+        Logger.warning(
+          "osd kill result " <>
+            "message=#{inspect(message)} " <>
+            "dead?=#{inspect(dead?)} " <>
+            "os_pid=#{inspect(os_pid)} " <>
+            "pgid=#{inspect(pgid)}"
+        )
+
+        dead?
+    end
+  end
+
+  defp alive_by_pid?(pid) when is_integer(pid) and pid > 0 do
+    case System.cmd("kill", ["-0", Integer.to_string(pid)], stderr_to_stdout: true) do
+      {_out, 0} -> true
+      {_out, _status} -> false
+    end
+  end
+
+  defp alive_by_pid?(_), do: false
+
+  defp alive_by_group?(pgid) when is_integer(pgid) and pgid > 0 do
+    case System.cmd("kill", ["-0", "--", Integer.to_string(-pgid)], stderr_to_stdout: true) do
+      {_out, 0} -> true
+      {_out, _status} -> false
+    end
+  end
+
+  defp alive_by_group?(_), do: false
+
+  defp get_pgid(pid) when is_integer(pid) and pid > 0 do
+    case System.cmd("ps", ["-o", "pgid=", "-p", Integer.to_string(pid)], stderr_to_stdout: true) do
+      {output, 0} ->
+        output
+        |> String.trim()
+        |> case do
+          "" ->
+            nil
+
+          value ->
+            case Integer.parse(value) do
+              {pgid, ""} -> pgid
+              _ -> nil
+            end
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp get_pgid(_), do: nil
+
+  defp safe_close_port(port) when is_port(port) do
+    try do
+      Port.close(port)
+    rescue
+      _ -> :ok
+    catch
+      _, _ -> :ok
+    end
+  end
+
+  defp safe_close_port(_), do: :ok
 end
 
 defmodule Volume do
-  def toggle_mute, do: ScriptRunner.run("easytv-volume.sh", [])
-  def increase, do: ScriptRunner.run("easytv-volume.sh", ["+"])
-  def decrease, do: ScriptRunner.run("easytv-volume.sh", ["-"])
+  # def toggle_mute, do: ScriptRunner.run("easytv-volume.sh", [])
+  # def increase, do: ScriptRunner.run("easytv-volume.sh", ["+"])
+  # def decrease, do: ScriptRunner.run("easytv-volume.sh", ["-"])
+  def toggle_mute, do: :ok
+  def increase, do:  :ok
+  def decrease, do:  :ok
 end
 
 defmodule Power do
-  def tv_off, do: ScriptRunner.run("easytv-power.sh", ["0"])
-  def tv_on, do: ScriptRunner.run("easytv-power.sh", ["1"])
+  # def tv_off, do: ScriptRunner.run("easytv-power.sh", ["0"])
+  # def tv_on, do: ScriptRunner.run("easytv-power.sh", ["1"])
+  def tv_off, do: :ok
+  def tv_on, do: :ok
 end
 
 defmodule App.Util do
@@ -1195,7 +1581,29 @@ defmodule App.Util do
   def normalize_offset(_), do: 0
 
   def current_channel_index(channels, channel) do
-    Enum.find_index(channels, &same_channel?(&1, channel)) || 0
+    Enum.find_index(channels, &same_channel?(&1, channel))
+  end
+
+  def preview_base_channel(channels, preview_channel, current_channel) do
+    preview_channel || current_channel || List.first(channels)
+  end
+
+  def preview_base_index(channels, preview_channel, current_channel) do
+    base_channel = preview_base_channel(channels, preview_channel, current_channel)
+
+    case current_channel_index(channels, base_channel) do
+      nil ->
+        Logger.warning(
+          "preview_base_index: base channel not found, falling back to index 0 " <>
+            "base_channel=#{inspect(base_channel && channel_id(base_channel))} " <>
+            "channels=#{inspect(Enum.map(channels, &channel_id/1))}"
+        )
+
+        0
+
+      index ->
+        index
+    end
   end
 
   def same_channel?(nil, nil), do: true
@@ -1331,14 +1739,12 @@ defmodule App.Playback do
         "current_channel=#{inspect(state.current_channel && state.current_channel.label)} " <>
         "current_file_index=#{inspect(state.current_file_index)} " <>
         "current_player=#{inspect(state.current_player)} " <>
-        "preview_active?=#{inspect(state.preview_active?)} " <>
         "next_prepare_ref=#{inspect(state.next_prepare_ref)} " <>
         "next_prepared?=#{inspect(not is_nil(state.next_prepared))}"
     )
 
     state
     |> App.Advance.clear_transition_state()
-    |> App.Preview.cancel_active_preview()
     |> App.Persistence.persist_current_channel_position()
     |> stop_current_item()
   end
@@ -1350,10 +1756,7 @@ defmodule App.Playback do
         "saved_current_channel_id=#{inspect(state.current_channel_id)}"
     )
 
-    state =
-      state
-      |> App.Advance.clear_transition_state()
-      |> App.Preview.cancel_active_preview()
+    state = App.Advance.clear_transition_state(state)
 
     case state.current_channel do
       nil ->
@@ -1381,7 +1784,6 @@ defmodule App.Playback do
                 "offset_seconds=#{inspect(offset_seconds)}"
             )
 
-            # Osd.show(channel.name)
             state
 
           {:error, state, reason} ->
@@ -1441,7 +1843,7 @@ defmodule App.Playback do
     )
 
     with {:ok, playerpid} <-
-          MpvPlayer.start_link(parent: self(), file: prepared.play_path, start_pos: startpos) do
+           MpvPlayer.start_link(parent: self(), file: prepared.play_path, start_pos: startpos) do
       new_state =
         build_started_playback_state(state, channel, file_index, playerpid, actual_path)
 
@@ -1460,18 +1862,54 @@ defmodule App.Playback do
     end
   end
 
-  def stop_current_item(%{current_player: nil} = state), do: state
+  def stop_current_item(%{current_player: nil} = state) do
+    Logger.debug(
+      "stop_current_item: no current player current_path=#{inspect(App.Util.current_original_path(state))}"
+    )
+
+    state
+  end
 
   def stop_current_item(%{current_player: player} = state) do
     Logger.info(
       "stop_current_item: player=#{inspect(player)} current_path=#{inspect(App.Util.current_original_path(state))}"
     )
 
-    try do
-      MpvPlayer.stop(player)
-    catch
-      :exit, {:noproc, _} -> :ok
-      :exit, _reason -> :ok
+    result =
+      try do
+        MpvPlayer.stop(player)
+      catch
+        :exit, {:noproc, _} = reason ->
+          Logger.warning(
+            "stop_current_item: player already gone player=#{inspect(player)} reason=#{inspect(reason)}"
+          )
+
+          :ok
+
+        :exit, reason ->
+          Logger.warning(
+            "stop_current_item: stop raised exit player=#{inspect(player)} reason=#{inspect(reason)}"
+          )
+
+          {:error, reason}
+      end
+
+    case result do
+      :ok ->
+        Logger.debug("stop_current_item: player fully stopped player=#{inspect(player)}")
+
+      {:ok, :already_stopping} ->
+        Logger.debug("stop_current_item: player already stopping player=#{inspect(player)}")
+
+      {:error, reason} ->
+        Logger.warning(
+          "stop_current_item: stop returned error player=#{inspect(player)} reason=#{inspect(reason)}"
+        )
+
+      other ->
+        Logger.warning(
+          "stop_current_item: unexpected stop result player=#{inspect(player)} result=#{inspect(other)}"
+        )
     end
 
     %{state | current_player: nil}
@@ -1537,42 +1975,32 @@ defmodule App.Playback do
           max_attempts
         )
 
-      not File.regular?(path) ->
-        Logger.warning("skipping missing file for #{channel.label}: #{inspect(path)}")
-
-        try_next_candidate(
-          state,
-          channel,
-          media,
-          requested_index,
-          offset_seconds,
-          candidate_index,
-          attempts,
-          max_attempts
-        )
-
       true ->
-        actual_offset =
-          playback_offset_for_candidate(path, candidate_index, requested_index, offset_seconds)
+        case PreparedMedia.prepare_for_playback(path) do
+          {:ok, prepared} ->
+            startpos =
+              if PreparedMedia.image_file?(path), do: 0, else: App.Util.normalize_offset(offset_seconds)
 
-        Logger.debug(
-          "try_play_channel_item: preparing channel=#{channel.label} candidate_index=#{candidate_index} path=#{inspect(path)} actual_offset=#{actual_offset} image?=#{PreparedMedia.image_file?(path)}"
-        )
+            case start_current_item(state, channel, candidate_index, prepared, startpos) do
+              {:ok, state, actual_file_index} ->
+                {:ok, state, actual_file_index}
 
-        with {:ok, prepared} <- PreparedMedia.prepare(path),
-             {:ok, new_state, _} <-
-               start_current_item(state, channel, candidate_index, prepared, actual_offset) do
-          actual_path = Enum.at(media, candidate_index)
+              {:error, _reason} ->
+                try_next_candidate(
+                  state,
+                  channel,
+                  media,
+                  requested_index,
+                  offset_seconds,
+                  candidate_index,
+                  attempts,
+                  max_attempts
+                )
+            end
 
-          Logger.info(
-            "playing #{channel.label}: #{inspect(actual_path)} candidate_index=#{candidate_index} requested_index=#{inspect(requested_index)}"
-          )
-
-          {:ok, new_state, candidate_index}
-        else
           {:error, reason} ->
-            Logger.warning(
-              "try_play_channel_item: play failed channel=#{channel.label} path=#{inspect(path)} candidate_index=#{candidate_index} reason=#{inspect(reason)}; trying next candidate"
+            Logger.error(
+              "try_play_channel_item: prepare failed channel=#{channel.label} candidate_index=#{inspect(candidate_index)} path=#{inspect(path)} reason=#{inspect(reason)}"
             )
 
             try_next_candidate(
@@ -1599,102 +2027,184 @@ defmodule App.Playback do
          attempts,
          max_attempts
        ) do
+    next_candidate_index = rem(candidate_index + 1, length(media))
+
     try_play_channel_item(
       state,
       channel,
       media,
       requested_index,
       offset_seconds,
-      App.Util.next_file_index(candidate_index, media),
+      next_candidate_index,
       attempts + 1,
       max_attempts
     )
   end
-
-  defp playback_offset_for_candidate(path, candidate_index, requested_index, offset_seconds) do
-    cond do
-      PreparedMedia.image_file?(path) ->
-        0
-
-      candidate_index == requested_index ->
-        App.Util.normalize_offset(offset_seconds)
-
-      true ->
-        0
-    end
-  end
 end
 
 defmodule App.Preview do
-  require Logger
+  @moduledoc false
 
   @preview_commit_ms 500
 
   def cancel_active_preview(%{preview_active?: false} = state), do: state
 
   def cancel_active_preview(state) do
-    App.Util.cancel_preview_timer(state.preview_timer)
     clear_preview_state(state)
   end
 
   def preview_next_channel(%{channels: []} = state), do: state
 
   def preview_next_channel(%{channels: channels} = state) do
-    base_channel = state.preview_channel || state.current_channel
+    base_channel =
+      Map.get(state, :preview_channel) ||
+        Map.get(state, :current_channel) ||
+        List.first(channels)
+
     current_index = App.Util.current_channel_index(channels, base_channel)
     next_index = rem(current_index + 1, length(channels))
-    request_preview_channel(state, Enum.at(channels, next_index))
+    begin_preview(state, Enum.at(channels, next_index))
   end
 
   def preview_prev_channel(%{channels: []} = state), do: state
 
   def preview_prev_channel(%{channels: channels} = state) do
-    base_channel = state.preview_channel || state.current_channel
+    base_channel =
+      Map.get(state, :preview_channel) ||
+        Map.get(state, :current_channel) ||
+        List.first(channels)
+
     current_index = App.Util.current_channel_index(channels, base_channel)
     prev_index = rem(current_index - 1 + length(channels), length(channels))
-    request_preview_channel(state, Enum.at(channels, prev_index))
+    begin_preview(state, Enum.at(channels, prev_index))
   end
 
-  def commit_preview(%{requested_channel: nil} = state) do
-    Logger.debug("commit_preview: no requested channel")
-    {:noop, clear_preview_state(state)}
+  def commit_preview(%{preview_channel: nil} = state) do
+    clear_preview_state(state)
   end
 
-  def commit_preview(%{requested_channel: requested_channel} = state) do
+  def commit_preview(%{switching?: true} = state) do
+    state
+  end
+
+  def commit_preview(state) do
+    requested_channel = state.preview_channel
+
     if App.Util.same_channel?(requested_channel, state.current_channel) do
-      Logger.debug("commit_preview: requested channel already current")
-      {:noop, clear_preview_state(state)}
+      clear_preview_state(state)
     else
-      Logger.info("commit_preview: committing requested_channel=#{requested_channel.label}")
-      {:switch_channel, requested_channel, clear_preview_state(state)}
+      seq = state.request_seq + 1
+      owner = self()
+
+      Task.start(fn ->
+        do_channel_switch(owner, seq, state, requested_channel)
+      end)
+
+      state
+      |> Map.put(:request_seq, seq)
+      |> Map.put(:switching?, true)
+      |> Map.put(:switching_seq, seq)
     end
   end
 
+  def handle_switch_result(%{switching_seq: seq, request_seq: seq} = state, {:ok, new_state}) do
+    new_state
+    |> Map.put(:switching?, false)
+    |> Map.put(:switching_seq, nil)
+    |> clear_preview_state()
+  end
+
+  def handle_switch_result(%{switching_seq: seq, request_seq: current_seq} = state, {:ok, new_state})
+      when seq != current_seq do
+    new_state
+    |> Map.put(:preview_channel, state.preview_channel)
+    |> Map.put(:preview_timer, state.preview_timer)
+    |> Map.put(:preview_active?, state.preview_active?)
+    |> Map.put(:commit_seq, state.commit_seq)
+    |> Map.put(:request_seq, state.request_seq)
+    |> Map.put(:switching?, false)
+    |> Map.put(:switching_seq, nil)
+    |> maybe_schedule_followup_commit()
+  end
+
+  def handle_switch_result(state, {:error, reason}) do
+    require Logger
+    Logger.error("handle_switch_result channel switch failed #{inspect(reason)}")
+
+    state
+    |> Map.put(:switching?, false)
+    |> Map.put(:switching_seq, nil)
+    |> maybe_schedule_followup_commit()
+  end
+
   def clear_preview_state(state) do
+    App.Util.cancel_preview_timer(Map.get(state, :preview_timer))
+
     state
     |> Map.put(:preview_channel, nil)
-    |> Map.put(:requested_channel, nil)
     |> Map.put(:preview_timer, nil)
     |> Map.put(:preview_active?, false)
   end
 
-  defp request_preview_channel(state, channel) do
-    App.Util.cancel_preview_timer(state.preview_timer)
-    timer_ref = Process.send_after(self(), :commit_preview, @preview_commit_ms)
+  defp begin_preview(state, channel) do
+    App.Util.cancel_preview_timer(Map.get(state, :preview_timer))
 
-    if not App.Util.same_channel?(channel, state.preview_channel) do
+    commit_seq = Map.get(state, :commit_seq, 0) + 1
+    timer_ref = Process.send_after(self(), {:commit_preview, commit_seq}, @preview_commit_ms)
+
+    if not App.Util.same_channel?(channel, Map.get(state, :current_channel)) do
       Osd.show(channel.name)
     end
 
-    Logger.debug(
-      "request_preview_channel: requested_channel=#{channel.label} timer_ref=#{inspect(timer_ref)}"
-    )
-
     state
     |> Map.put(:preview_channel, channel)
-    |> Map.put(:requested_channel, channel)
     |> Map.put(:preview_timer, timer_ref)
     |> Map.put(:preview_active?, true)
+    |> Map.put(:commit_seq, commit_seq)
+  end
+
+  defp maybe_schedule_followup_commit(state) do
+    cond do
+      Map.get(state, :preview_channel) == nil ->
+        state
+
+      App.Util.same_channel?(Map.get(state, :preview_channel), Map.get(state, :current_channel)) ->
+        clear_preview_state(state)
+
+      true ->
+        Process.send_after(self(), {:commit_preview, Map.get(state, :commit_seq, 0)}, 0)
+        state
+    end
+  end
+
+  defp do_channel_switch(owner, seq, state, requested_channel) do
+    try do
+      state =
+        state
+        |> App.Advance.clear_transition_state()
+        |> App.Persistence.persist_current_channel_position()
+
+      state = App.Playback.stop_current_item(state)
+
+      {file_index, offset_seconds, state} =
+        App.Persistence.load_or_initialize_channel_position(state, requested_channel)
+
+      case App.Playback.play_channel_item(state, requested_channel, file_index, offset_seconds) do
+        {:ok, new_state, _actual_file_index} ->
+          new_state =
+            new_state
+            |> Map.put(:current_channel, requested_channel)
+            |> Map.put(:current_channel_id, App.Util.channel_id(requested_channel))
+
+          send(owner, {:channel_switch_result, seq, {:ok, new_state}})
+
+        {:error, new_state, reason} ->
+          send(owner, {:channel_switch_result, seq, {:error, reason, new_state}})
+      end
+    catch
+      kind, reason ->
+        send(owner, {:channel_switch_result, seq, {:error, {kind, reason}}})
+    end
   end
 end
 
@@ -1704,7 +2214,7 @@ defmodule App.Advance do
   @slideshow_image_display_ms 10_000
 
   def maybe_advance(%{current_channel: nil} = state) do
-    Logger.debug("maybe_advance: no current channel")
+    Logger.debug("maybe_advance no current channel")
     state
   end
 
@@ -1713,28 +2223,26 @@ defmodule App.Advance do
     image? = PreparedMedia.image_file?(current_path)
 
     Logger.debug(
-      "maybe_advance: current_path=#{inspect(current_path)} image?=#{image?} display_elapsed?=#{inspect(state.display_elapsed?)} next_prepared=#{inspect(state.next_prepared && Map.take(state.next_prepared, [:file_index, :path, :result]))}"
+      "maybe_advance current_path=#{inspect(current_path)} image?=#{inspect(image?)} display_elapsed?=#{inspect(state.display_elapsed?)} next_prepared=#{inspect(Map.take(state.next_prepared || %{}, [:file_index, :path, :result]))}"
     )
 
     cond do
       image? and state.display_elapsed? and not is_nil(state.next_prepared) ->
-        Logger.info("maybe_advance: conditions met, advancing to prepared next item")
+        Logger.info("maybe_advance conditions met, advancing to prepared next item")
         advance_to_prepared_next(state)
 
       true ->
-        Logger.debug("maybe_advance: conditions not met, waiting")
+        Logger.debug("maybe_advance conditions not met, waiting")
         state
     end
   end
 
-  def advance_to_prepared_next(
-        %{next_prepared: %{file_index: file_index, result: {:ok, prepared}}} = state
-      ) do
+  def advance_to_prepared_next(%{next_prepared: %{file_index: file_index, result: {:ok, prepared}}} = state) do
     channel = state.current_channel
     actual_path = Enum.at(channel.media, file_index)
 
     Logger.info(
-      "advance_to_prepared_next: channel=#{channel.label} file_index=#{file_index} actual_path=#{inspect(actual_path)} prepared_play_path=#{inspect(prepared.play_path)}"
+      "advance_to_prepared_next channel=#{channel.label} file_index=#{file_index} actual_path=#{inspect(actual_path)} prepared_playpath=#{inspect(prepared.playpath)}"
     )
 
     state =
@@ -1748,16 +2256,13 @@ defmodule App.Advance do
         state
 
       {:error, reason} ->
-        Logger.error(
-          "failed starting prepared next item #{inspect(actual_path)}: #{inspect(reason)}"
-        )
-
+        Logger.error("failed starting prepared next item #{inspect(actual_path)} #{inspect(reason)}")
         advance_current_channel_item(state)
     end
   end
 
   def advance_to_prepared_next(%{next_prepared: %{path: path, result: {:error, reason}}} = state) do
-    Logger.error("async prepare failed for next item #{inspect(path)}: #{inspect(reason)}")
+    Logger.error("async prepare failed for next item #{inspect(path)} #{inspect(reason)}")
 
     state
     |> clear_transition_state()
@@ -1765,16 +2270,21 @@ defmodule App.Advance do
   end
 
   def advance_to_prepared_next(state) do
-    Logger.debug(
-      "advance_to_prepared_next: no usable prepared item next_prepared=#{inspect(state.next_prepared)}"
-    )
-
+    Logger.debug("advance_to_prepared_next no usable prepared item next_prepared=#{inspect(state.next_prepared)}")
     state
   end
 
   def advance_current_channel_item(%{current_channel: nil} = state) do
-    Logger.debug("advance_current_channel_item: skip no current channel")
+    Logger.debug("advance_current_channel_item skip no current channel")
     state
+  end
+
+  def advance_current_channel_item(%{switching?: true} = state) do
+    Logger.info(
+      "advance_current_channel_item skipping because channel switch is in progress current_channel=#{inspect(state.current_channel && state.current_channel.label)} current_index=#{inspect(state.current_file_index)} switching_seq=#{inspect(state.switching_seq)}"
+    )
+
+    %{state | current_player: nil}
   end
 
   def advance_current_channel_item(state) do
@@ -1782,7 +2292,7 @@ defmodule App.Advance do
     requested_file_index = App.Util.next_file_index(state.current_file_index, channel.media)
 
     Logger.info(
-      "advance_current_channel_item: channel=#{channel.label} current_index=#{inspect(state.current_file_index)} requested_next_index=#{requested_file_index} current_player=#{inspect(state.current_player)}"
+      "advance_current_channel_item channel=#{channel.label} current_index=#{inspect(state.current_file_index)} requested_next_index=#{requested_file_index} current_player=#{inspect(state.current_player)}"
     )
 
     state = App.Playback.stop_current_item(state)
@@ -1792,7 +2302,7 @@ defmodule App.Advance do
         actual_path = Enum.at(channel.media, actual_file_index)
 
         Logger.info(
-          "advance_current_channel_item: started channel=#{channel.label} actual_index=#{actual_file_index} actual_path=#{inspect(actual_path)}"
+          "advance_current_channel_item started #{channel.label} actual_index=#{actual_file_index} actual_path=#{inspect(actual_path)}"
         )
 
         state
@@ -1801,7 +2311,7 @@ defmodule App.Advance do
 
       {:error, state, reason} ->
         Logger.error(
-          "advance_current_channel_item: failed channel=#{channel.label} requested_next_index=#{requested_file_index} reason=#{inspect(reason)}"
+          "advance_current_channel_item failed channel=#{channel.label} requested_next_index=#{requested_file_index} reason=#{inspect(reason)}"
         )
 
         %{state | current_player: nil}
@@ -1815,31 +2325,28 @@ defmodule App.Advance do
       timer_ref = Process.send_after(self(), :image_display_expired, @slideshow_image_display_ms)
 
       Logger.debug(
-        "maybe_start_image_display_timer: armed path=#{inspect(path)} timer_ref=#{inspect(timer_ref)} display_ms=#{@slideshow_image_display_ms}"
+        "maybe_start_image_display_timer armed path=#{inspect(path)} timer_ref=#{inspect(timer_ref)} display_ms=#{@slideshow_image_display_ms}"
       )
 
       %{state | image_display_timer: timer_ref, display_elapsed?: false}
     else
-      Logger.debug(
-        "maybe_start_image_display_timer: skipped non-image path=#{inspect(path)}"
-      )
-
+      Logger.debug("maybe_start_image_display_timer skipped non-image path=#{inspect(path)}")
       %{state | image_display_timer: nil, display_elapsed?: false}
     end
   end
 
   def maybe_prepare_next_item(%{current_channel: nil} = state) do
-    Logger.debug("maybe_prepare_next_item: skip no current channel")
+    Logger.debug("maybe_prepare_next_item skip no current channel")
     state
   end
 
   def maybe_prepare_next_item(%{next_prepare_task: task} = state) when not is_nil(task) do
-    Logger.debug("maybe_prepare_next_item: skip task already running")
+    Logger.debug("maybe_prepare_next_item skip task already running")
     state
   end
 
   def maybe_prepare_next_item(%{next_prepared: prepared} = state) when not is_nil(prepared) do
-    Logger.debug("maybe_prepare_next_item: skip next item already prepared")
+    Logger.debug("maybe_prepare_next_item skip next item already prepared")
     state
   end
 
@@ -1848,7 +2355,7 @@ defmodule App.Advance do
 
     if media == [] or not is_integer(state.current_file_index) do
       Logger.debug(
-        "maybe_prepare_next_item: skip media_empty?=#{inspect(media == [])} current_file_index=#{inspect(state.current_file_index)}"
+        "maybe_prepare_next_item skip media_empty?=#{inspect(media == [])} current_file_index=#{inspect(state.current_file_index)}"
       )
 
       state
@@ -1857,7 +2364,7 @@ defmodule App.Advance do
       next_path = Enum.at(media, next_index)
 
       Logger.debug(
-        "maybe_prepare_next_item: starting async prepare next_index=#{next_index} next_path=#{inspect(next_path)} current_index=#{inspect(state.current_file_index)} current_path=#{inspect(App.Util.current_original_path(state))} screen_off?=#{inspect(state.screen_off?)}"
+        "maybe_prepare_next_item starting async prepare next_index=#{next_index} next_path=#{inspect(next_path)} current_index=#{inspect(state.current_file_index)} current_path=#{inspect(App.Util.current_original_path(state))}"
       )
 
       start_prepare_next_task(state, next_index, next_path)
@@ -1866,7 +2373,7 @@ defmodule App.Advance do
 
   def clear_transition_state(state) do
     Logger.debug(
-      "clear_transition_state: clearing image timer and prepared-next state current_path=#{inspect(App.Util.current_original_path(state))}"
+      "clear_transition_state clearing image timer and prepared-next state current_path=#{inspect(App.Util.current_original_path(state))}"
     )
 
     state
@@ -1885,8 +2392,6 @@ defmodule App.Advance do
   def clear_next_prepare(%{next_prepare_task: nil} = state), do: state
 
   def clear_next_prepare(state) do
-    # Do not Task.await/shutdown here; this can be called from any process.
-    # Just drop the references from the state. The task will exit on its own.
     state
     |> Map.put(:next_prepare_task, nil)
     |> Map.put(:next_prepare_ref, nil)
@@ -1901,11 +2406,11 @@ defmodule App.Advance do
     task =
       Task.async(fn ->
         started_ms = System.monotonic_time(:millisecond)
-        result = PreparedMedia.prepare(next_path)
+        result = PreparedMedia.prepare_for_playback(next_path)
         elapsed_ms = System.monotonic_time(:millisecond) - started_ms
 
         Logger.info(
-          "maybe_prepare_next_item: finished async prepare next_index=#{next_index} next_path=#{inspect(next_path)} elapsed_ms=#{elapsed_ms} result=#{inspect(result)}"
+          "maybe_prepare_next_item finished async prepare next_index=#{next_index} next_path=#{inspect(next_path)} elapsed_ms=#{elapsed_ms} result=#{inspect(result)}"
         )
 
         send(owner, {ref, {:prepared_next_item, next_index, next_path, result}})
@@ -1918,223 +2423,110 @@ defmodule App.Advance do
   end
 end
 
-defmodule App.ChannelSwitcher do
-  use GenServer
-
-  defmodule State do
-    defstruct next_request_id: 1,
-              latest_request_id: nil,
-              latest_channel: nil,
-              in_flight_request_id: nil,
-              in_flight_channel: nil
-  end
-
-  def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: opts[:name])
-  end
-
-  def request_switch(server, channel) do
-    GenServer.call(server, {:request_switch, channel})
-  end
-
-  def begin_next_switch(server) do
-    GenServer.call(server, :begin_next_switch)
-  end
-
-  def finish_switch(server, request_id) do
-    GenServer.call(server, {:finish_switch, request_id})
-  end
-
-  def peek_latest(server) do
-    GenServer.call(server, :peek_latest)
-  end
-
-  @impl true
-  def init(_opts) do
-    {:ok, %State{}}
-  end
-
-  @impl true
-  def handle_call({:request_switch, channel}, _from, state) do
-    request_id = state.next_request_id
-
-    state = %State{
-      state
-      | next_request_id: request_id + 1,
-        latest_request_id: request_id,
-        latest_channel: channel
-    }
-
-    {:reply, {:ok, request_id}, state}
-  end
-
-  def handle_call(:begin_next_switch, _from, %{latest_request_id: nil} = state) do
-    {:reply, :none, state}
-  end
-
-  def handle_call(:begin_next_switch, _from, %{in_flight_request_id: request_id} = state)
-      when not is_nil(request_id) do
-    {:reply, :busy, state}
-  end
-
-  def handle_call(:begin_next_switch, _from, state) do
-    state = %State{
-      state
-      | in_flight_request_id: state.latest_request_id,
-        in_flight_channel: state.latest_channel
-    }
-
-    {:reply, {:ok, state.in_flight_request_id, state.in_flight_channel}, state}
-  end
-
-  def handle_call({:finish_switch, request_id}, _from, state) do
-    stale? =
-      not is_nil(state.latest_request_id) and request_id < state.latest_request_id
-
-    state =
-      if state.in_flight_request_id == request_id do
-        %State{state | in_flight_request_id: nil, in_flight_channel: nil}
-      else
-        state
-      end
-
-    reply =
-      if stale? do
-        :stale_reschedule
-      else
-        :apply_current
-      end
-
-    {:reply, reply, state}
-  end
-
-  def handle_call(:peek_latest, _from, state) do
-    {:reply, {state.latest_request_id, state.latest_channel}, state}
-  end
-end
-
-defmodule App do
+defmodule App.Input do
   use GenServer
   require Logger
 
-  def main(argv) do
-    {opts, mediadirs, invalid} = OptionParser.parse(argv, strict: [scan: :boolean])
+  @preview_commit_ms 2000
 
-    cond do
-      invalid != [] ->
-        usage("invalid options: #{inspect(invalid)}")
+  def start_link(opts) do
+    GenServer.start_link(__MODULE__, opts, opts)
+  end
 
-      mediadirs == [] ->
-        usage("missing media dirs")
+  def input_event(server, dev, events) do
+    send(server, {:input_event, dev, events})
+    :ok
+  end
 
-      true ->
-        mediadirs = mediadirs |> Enum.map(&Path.expand/1) |> Enum.uniq()
-        scan? = Keyword.get(opts, :scan, false)
+  defmodule PreviewSession do
+    defstruct seq: 0,
+              base_channel: nil,
+              target_channel: nil,
+              timer_ref: nil,
+              wrapped_to_current?: false,
+              switching?: false
+  end
 
-        saved_state = StateStore.load!()
-        saved_channel_state = Map.fetch!(saved_state, "channel_state")
-        saved_current_channel_id = Map.fetch!(saved_state, "current_channel_id")
-
-        catalog = load_or_build_catalog!(mediadirs, scan?)
-        channels = active_channels_for_roots(catalog, mediadirs)
-
-        if channels == [] do
-          usage("no playable media found in supplied media dirs")
-        end
-
-        current_channel =
-          Enum.find(channels, fn channel ->
-            App.Util.channel_id(channel) == saved_current_channel_id
-          end) || List.first(channels)
-
-        init_state =
-          build_init_state(mediadirs, catalog, channels, current_channel, saved_channel_state)
-
-        {:ok, pid} = GenServer.start_link(__MODULE__, init_state)
-        ref = Process.monitor(pid)
-
-        receive do
-          {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
-        end
-    end
+  defmodule State do
+    defstruct channels: [],
+              playback_owner: nil,
+              current_channel: nil,
+              preview_session: nil,
+              next_seq: 0,
+              screen_off?: false,
+              pressed_keys: MapSet.new()
   end
 
   @impl true
-  def init(state) do
-    Process.flag(:trap_exit, true)
-    state = if Keyword.keyword?(state), do: Enum.into(state, %{}), else: state
+  def init(opts) do
+    state = %State{
+      channels: Keyword.fetch!(opts, :channels),
+      playback_owner: Keyword.get(opts, :playback_owner),
+      current_channel: Keyword.get(opts, :current_channel),
+      screen_off?: false
+    }
 
-    {:ok, runtime_sup} = RuntimeSupervisor.start_link(receiver: self())
-    {:ok, channel_switcher} = App.ChannelSwitcher.start_link()
-
-    state =
-      state
-      |> Map.put(:runtime_sup, runtime_sup)
-      |> Map.put(:channel_switcher, channel_switcher)
-      |> Map.put(:screen_off?, false)
-      |> App.Persistence.ensure_all_channel_state_entries()
-
-    case Power.tv_on() do
-      :ok ->
-        Logger.info("init: tv on")
-
-      {:error, reason} ->
-        Logger.error("init: tv on failed #{inspect(reason)}")
-    end
-
-    {:ok, start_initial_playback(state)}
+    {:ok, state}
   end
 
   @impl true
-  def handle_info({:input_event, _dev, events}, state) when is_list(events) do
+  def handle_info({:input_event, dev, events}, state) when is_list(events) do
+    Logger.warning("input_event dev=#{inspect(dev)} events=#{inspect(events)}")
+
     state =
       if state.screen_off? and App.Util.wake_keypress?(events) do
         wake_screen(state)
       else
         Enum.reduce(events, state, fn
           {:ev_key, :key_pageup, 1}, state ->
-            Logger.info("PgUp -> prev channel")
-            App.Preview.preview_prev_channel(state)
+            Logger.warning("PgUp from dev=#{inspect(dev)}")
+            preview_prev_channel(state)
 
           {:ev_key, :key_pagedown, 1}, state ->
-            Logger.info("PgDn -> next channel")
-            App.Preview.preview_next_channel(state)
+            Logger.warning("PgDn from dev=#{inspect(dev)}")
+            preview_next_channel(state)
 
           {:ev_key, :key_space, 1}, state ->
+            Logger.warning("Space from dev=#{inspect(dev)}")
             toggle_screen(state)
 
           {:ev_key, :key_q, 1}, state ->
-            Logger.info("Q -> quit")
+            Logger.warning("Q from dev=#{inspect(dev)}")
+
+            if state.playback_owner do
+              GenServer.cast(state.playback_owner, :quit)
+            end
+
             Process.send_after(self(), :quit, 0)
             state
 
           {:ev_key, :key_m, 1}, state ->
-            Logger.info("M -> toggle mute")
+            Logger.warning("M from dev=#{inspect(dev)}")
             _ = Volume.toggle_mute()
             state
 
           {:ev_key, :key_minus, 1}, state ->
-            Logger.info("- -> volume down")
+            Logger.warning("- from dev=#{inspect(dev)}")
             _ = Volume.decrease()
             state
 
           {:ev_key, :key_kpminus, 1}, state ->
-            Logger.info("Numpad - -> volume down")
+            Logger.warning("Numpad - from dev=#{inspect(dev)}")
             _ = Volume.decrease()
             state
 
           {:ev_key, :key_equal, 1}, state ->
-            Logger.info("= -> volume up")
+            Logger.warning("= from dev=#{inspect(dev)}")
             _ = Volume.increase()
             state
 
           {:ev_key, :key_plus, 1}, state ->
-            Logger.info("+ -> volume up")
+            Logger.warning("+ from dev=#{inspect(dev)}")
             _ = Volume.increase()
             state
 
           {:ev_key, :key_kpplus, 1}, state ->
-            Logger.info("Numpad + -> volume up")
+            Logger.warning("Numpad + from dev=#{inspect(dev)}")
             _ = Volume.increase()
             state
 
@@ -2146,6 +2538,352 @@ defmodule App do
     {:noreply, state}
   end
 
+  @impl true
+  def handle_info({:commit_preview, seq}, %{preview_session: %PreviewSession{seq: active_seq}} = state)
+      when seq != active_seq do
+    Logger.warning(
+      "commit_preview ignored: stale_timer " <>
+        "timer_seq=#{inspect(seq)} " <>
+        "active_seq=#{inspect(active_seq)} " <>
+        "current=#{inspect(state.current_channel && state.current_channel.name)} " <>
+        "preview=#{inspect(state.preview_session && state.preview_session.target_channel && state.preview_session.target_channel.name)}"
+    )
+
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:commit_preview, _seq}, %{preview_session: nil} = state) do
+    Logger.warning(
+      "commit_preview ignored: no_preview_session " <>
+        "current=#{inspect(state.current_channel && state.current_channel.name)}"
+    )
+
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:commit_preview, seq}, %{preview_session: %PreviewSession{seq: seq, switching?: true}} = state) do
+    Logger.warning(
+      "commit_preview ignored: already_switching " <>
+        "seq=#{inspect(seq)} " <>
+        "current=#{inspect(state.current_channel && state.current_channel.name)} " <>
+        "target=#{inspect(state.preview_session.target_channel && state.preview_session.target_channel.name)}"
+    )
+
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:commit_preview, seq}, %{playback_owner: nil} = state) do
+    Logger.warning(
+      "commit_preview ignored: no_playback_owner " <>
+        "seq=#{inspect(seq)} " <>
+        "current=#{inspect(state.current_channel && state.current_channel.name)}"
+    )
+
+    {:noreply, clear_preview_session(state)}
+  end
+
+  @impl true
+  def handle_info({:commit_preview, seq}, %{preview_session: %PreviewSession{seq: seq} = session} = state) do
+    Logger.warning(
+      "commit_preview handling " <>
+        "seq=#{inspect(seq)} " <>
+        "current=#{inspect(state.current_channel && state.current_channel.name)} " <>
+        "target=#{inspect(session.target_channel && session.target_channel.name)} " <>
+        "wrapped_to_current?=#{inspect(session.wrapped_to_current?)}"
+    )
+
+    if App.Util.same_channel?(session.target_channel, state.current_channel) do
+      Logger.warning(
+        "commit_preview cleared: preview_equals_current " <>
+          "channel=#{inspect(state.current_channel && state.current_channel.name)} " <>
+          "seq=#{inspect(seq)}"
+      )
+
+      {:noreply, clear_preview_session(state)}
+    else
+      Logger.warning(
+        "commit_preview begin_switch " <>
+          "seq=#{inspect(seq)} " <>
+          "from=#{inspect(state.current_channel && state.current_channel.name)} " <>
+          "to=#{inspect(session.target_channel && session.target_channel.name)}"
+      )
+
+      GenServer.cast(state.playback_owner, {:begin_switch, seq, session.target_channel})
+
+      {:noreply, put_in(state.preview_session.switching?, true)}
+    end
+  end
+
+  @impl true
+  def handle_info({:switch_result, seq, :ok, channel}, %{preview_session: %PreviewSession{seq: seq}} = state) do
+    Logger.warning(
+      "switch_result success " <>
+        "seq=#{inspect(seq)} " <>
+        "channel=#{inspect(channel && channel.name)}"
+    )
+
+    state =
+      state
+      |> Map.put(:current_channel, channel)
+      |> clear_preview_session()
+
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:switch_result, seq, {:error, reason}, channel}, %{preview_session: %PreviewSession{seq: seq}} = state) do
+    Logger.error(
+      "channel switch failed " <>
+        "seq=#{inspect(seq)} " <>
+        "channel=#{inspect(channel && channel.name)} " <>
+        "reason=#{inspect(reason)}"
+    )
+
+    state =
+      case state.preview_session do
+        nil -> state
+        session -> %{state | preview_session: %{session | switching?: false}}
+      end
+
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:switch_result, _seq, _result, _channel}, state) do
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:playback_started, channel}, state) do
+    {:noreply, %{state | current_channel: channel}}
+  end
+
+  @impl true
+  def handle_info({:playback_failed, _channel, _reason}, state) do
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info(:quit, state) do
+    Osd.clear()
+    {:stop, :normal, state}
+  end
+
+  @impl true
+  def handle_info(_msg, state), do: {:noreply, state}
+
+  defp preview_next_channel(%State{channels: []} = state), do: state
+
+  defp preview_next_channel(%State{channels: channels} = state) do
+    base_channel =
+      case state.preview_session do
+        %PreviewSession{target_channel: channel} when not is_nil(channel) ->
+          channel
+
+        _ ->
+          state.current_channel || List.first(channels)
+      end
+
+    current_index = App.Util.current_channel_index(channels, base_channel)
+    next_index = rem(current_index + 1, length(channels))
+    next_channel = Enum.at(channels, next_index)
+
+    Logger.warning(
+      "preview_next_channel " <>
+        "current=#{inspect(state.current_channel && state.current_channel.name)} " <>
+        "preview=#{inspect(state.preview_session && state.preview_session.target_channel && state.preview_session.target_channel.name)} " <>
+        "base=#{inspect(base_channel && base_channel.name)} " <>
+        "current_index=#{inspect(current_index)} " <>
+        "next_index=#{inspect(next_index)} " <>
+        "next=#{inspect(next_channel && next_channel.name)}"
+    )
+
+    request_preview_channel(state, base_channel, next_channel)
+  end
+
+  defp preview_prev_channel(%State{channels: []} = state), do: state
+
+  defp preview_prev_channel(%State{channels: channels} = state) do
+    base_channel =
+      case state.preview_session do
+        %PreviewSession{target_channel: channel} when not is_nil(channel) ->
+          channel
+
+        _ ->
+          state.current_channel || List.first(channels)
+      end
+
+    current_index = App.Util.current_channel_index(channels, base_channel)
+    prev_index = rem(current_index - 1 + length(channels), length(channels))
+    prev_channel = Enum.at(channels, prev_index)
+
+    Logger.warning(
+      "preview_prev_channel " <>
+        "current=#{inspect(state.current_channel && state.current_channel.name)} " <>
+        "preview=#{inspect(state.preview_session && state.preview_session.target_channel && state.preview_session.target_channel.name)} " <>
+        "base=#{inspect(base_channel && base_channel.name)} " <>
+        "current_index=#{inspect(current_index)} " <>
+        "prev_index=#{inspect(prev_index)} " <>
+        "prev=#{inspect(prev_channel && prev_channel.name)}"
+    )
+
+    request_preview_channel(state, base_channel, prev_channel)
+  end
+
+  defp request_preview_channel(state, base_channel, channel) do
+    cancel_preview_session_timer(state.preview_session)
+
+    seq = state.next_seq + 1
+    timer_ref = Process.send_after(self(), {:commit_preview, seq}, @preview_commit_ms)
+
+    wrapped_to_current? = App.Util.same_channel?(channel, state.current_channel)
+
+    Logger.warning(
+      "request_preview_channel " <>
+        "seq=#{inspect(seq)} " <>
+        "current=#{inspect(state.current_channel && state.current_channel.name)} " <>
+        "preview_before=#{inspect(state.preview_session && state.preview_session.target_channel && state.preview_session.target_channel.name)} " <>
+        "requested=#{inspect(channel && channel.name)} " <>
+        "wrapped_to_current?=#{inspect(wrapped_to_current?)}"
+    )
+
+    Osd.show(channel.name)
+
+    %State{
+      state
+      | preview_session: %PreviewSession{
+          seq: seq,
+          base_channel: base_channel,
+          target_channel: channel,
+          timer_ref: timer_ref,
+          wrapped_to_current?: wrapped_to_current?,
+          switching?: false
+        },
+        next_seq: seq
+    }
+  end
+
+  defp clear_preview_session(state) do
+    cancel_preview_session_timer(state.preview_session)
+    %{state | preview_session: nil}
+  end
+
+  defp cancel_preview_session_timer(%PreviewSession{timer_ref: timer_ref}) when not is_nil(timer_ref) do
+    App.Util.cancel_preview_timer(timer_ref)
+  end
+
+  defp cancel_preview_session_timer(_), do: :ok
+
+  defp toggle_screen(%{screen_off?: true} = state), do: wake_screen(state)
+  defp toggle_screen(state), do: turn_screen_off(state)
+
+  defp turn_screen_off(state) do
+    case Power.tv_off() do
+      :ok -> Logger.info("tv off")
+      {:error, reason} -> Logger.error("tv off failed #{inspect(reason)}")
+    end
+
+    %{state | screen_off?: true}
+  end
+
+  defp wake_screen(state) do
+    case Power.tv_on() do
+      :ok ->
+        Logger.info("wake_screen: tv on")
+        %{state | screen_off?: false}
+
+      {:error, reason} ->
+        Logger.error("wake_screen: tv on failed #{inspect(reason)}")
+        state
+    end
+  end
+end
+
+defmodule App.PlaybackOwner do
+  use GenServer
+  require Logger
+
+  def start_link(opts) do
+    GenServer.start_link(__MODULE__, opts, opts)
+  end
+
+  defmodule State do
+    defstruct input_pid: nil,
+              current_channel: nil,
+              current_channel_id: nil,
+              current_file_index: nil,
+              current_player: nil,
+              channel_state: %{},
+              channels: [],
+              image_display_timer: nil,
+              next_prepared: nil,
+              next_prepare_task: nil,
+              next_prepare_ref: nil,
+              next_requested_file_index: nil,
+              display_elapsed?: false,
+              switching?: false,
+              switching_seq: nil
+  end
+
+  @impl true
+  def init(opts) do
+    Process.flag(:trap_exit, true)
+
+    current_channel = Keyword.fetch!(opts, :current_channel)
+
+    state = %State{
+      input_pid: Keyword.fetch!(opts, :input_pid),
+      current_channel: current_channel,
+      current_channel_id: App.Util.channel_id(current_channel),
+      channel_state: Keyword.fetch!(opts, :channel_state),
+      channels: Keyword.fetch!(opts, :channels)
+    }
+
+    state =
+      state
+      |> App.Persistence.ensure_all_channel_state_entries()
+      |> start_initial_playback()
+
+    {:ok, state}
+  end
+
+  @impl true
+  def handle_cast({:begin_switch, seq, channel}, state) do
+    Logger.warning(
+      "begin_switch seq=#{inspect(seq)} channel=#{inspect(channel && channel.name)}"
+    )
+
+    new_state =
+      try do
+        do_begin_channel_switch(
+          %{state | switching?: true, switching_seq: seq},
+          seq,
+          channel
+        )
+      rescue
+        error ->
+          send(state.input_pid, {:playback_failed, channel, error})
+          send(state.input_pid, {:switch_result, seq, {:error, error}, channel})
+          %{state | switching?: false, switching_seq: nil}
+      catch
+        kind, reason ->
+          send(state.input_pid, {:playback_failed, channel, {kind, reason}})
+          send(state.input_pid, {:switch_result, seq, {:error, {kind, reason}}, channel})
+          %{state | switching?: false, switching_seq: nil}
+      end
+
+    {:noreply, new_state}
+  end
+
+  @impl true
+  def handle_cast(:quit, state) do
+    {:stop, :normal, state}
+  end
+
+  @impl true
   def handle_info({:mpv_position, pid, seconds}, %{current_player: pid} = state) do
     current_path = App.Util.current_original_path(state)
 
@@ -2162,6 +2900,11 @@ defmodule App do
 
   def handle_info({:mpv_position, _pid, _seconds}, state), do: {:noreply, state}
 
+  def handle_info({:mpv_end_of_file, pid, reason}, %{current_player: pid, switching?: true} = state) do
+    Logger.info("mpv_end_of_file ignoring current-player eof during switch pid=#{inspect(pid)} reason=#{inspect(reason)}")
+    {:noreply, %{state | current_player: nil}}
+  end
+
   def handle_info({:mpv_end_of_file, pid, reason}, %{current_player: pid} = state) do
     current_path = App.Util.current_original_path(state)
 
@@ -2170,45 +2913,26 @@ defmodule App do
     )
 
     if PreparedMedia.image_file?(current_path) do
-      Logger.debug("mpv_end_of_file: image item reached end-of-file, clearing current_player only")
       {:noreply, %{state | current_player: nil}}
     else
-      Logger.info("mpv_end_of_file: advancing non-image item")
       {:noreply, App.Advance.advance_current_channel_item(%{state | current_player: nil})}
     end
   end
 
-  def handle_info({:mpv_end_of_file, _pid, reason}, state) do
-    Logger.debug(
-      "mpv_end_of_file: ignoring stale event reason=#{inspect(reason)} current_player=#{inspect(state.current_player)}"
-    )
-
-    {:noreply, state}
-  end
+  def handle_info({:mpv_end_of_file, _pid, _reason}, state), do: {:noreply, state}
 
   def handle_info({:mpv_event, pid, :process_exit, payload}, %{current_player: pid} = state) do
     stopping? = Map.get(payload, :stopping?) || Map.get(payload, "stopping?")
 
-    Logger.info(
-      "mpv process_exit: pid=#{inspect(pid)} stopping?=#{inspect(stopping?)} payload=#{inspect(payload)} current_channel=#{inspect(state.current_channel && state.current_channel.label)} next_prepared=#{inspect(state.next_prepared && Map.take(state.next_prepared, [:file_index, :path]))}"
-    )
-
     if stopping? do
-      Logger.debug("mpv process_exit: expected stop, clearing current_player")
       {:noreply, %{state | current_player: nil}}
     else
-      Logger.error(
-        "playback exited unexpectedly for #{state.current_channel.label}: #{inspect(payload)}"
-      )
-
       state =
         case state.next_prepared do
           %{result: {:ok, _prepared}} ->
-            Logger.info("mpv process_exit: attempting prepared-next recovery")
             App.Advance.advance_to_prepared_next(%{state | current_player: nil})
 
           _ ->
-            Logger.info("mpv process_exit: falling back to normal advance")
             App.Advance.advance_current_channel_item(%{state | current_player: nil})
         end
 
@@ -2224,10 +2948,6 @@ defmodule App do
   def handle_info({:mpv_event, _pid, _kind, _payload}, state), do: {:noreply, state}
 
   def handle_info(:image_display_expired, state) do
-    Logger.info(
-      "image_display_expired: current_path=#{inspect(App.Util.current_original_path(state))} current_index=#{inspect(state.current_file_index)} next_prepare_ref=#{inspect(state.next_prepare_ref)} next_prepared?=#{not is_nil(state.next_prepared)}"
-    )
-
     state =
       state
       |> Map.put(:image_display_timer, nil)
@@ -2240,12 +2960,6 @@ defmodule App do
         {ref, {:prepared_next_item, file_index, path, result}},
         %{next_prepare_ref: ref} = state
       ) do
-    expected_path = expected_prepared_path(state, file_index)
-
-    Logger.debug(
-      "prepared-next result received ref=#{inspect(ref)} index=#{inspect(file_index)} path=#{inspect(path)} expected_path=#{inspect(expected_path)} path_match?=#{path == expected_path} result=#{inspect(result)}"
-    )
-
     Process.demonitor(ref, [:flush])
 
     state =
@@ -2258,10 +2972,6 @@ defmodule App do
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{next_prepare_ref: ref} = state) do
-    Logger.warning(
-      "prepared-next task down ref=#{inspect(ref)} requested_index=#{inspect(state.next_requested_file_index)} reason=#{inspect(reason)}"
-    )
-
     state =
       state
       |> clear_prepare_task_tracking()
@@ -2273,7 +2983,6 @@ defmodule App do
 
     state =
       if PreparedMedia.image_file?(App.Util.current_original_path(state)) do
-        Logger.debug("prepared-next task down while image showing; trying maybe_advance")
         App.Advance.maybe_advance(state)
       else
         state
@@ -2282,48 +2991,10 @@ defmodule App do
     {:noreply, state}
   end
 
-  def handle_info(:commit_preview, state) do
-    case App.Preview.commit_preview(state) do
-      {:noop, new_state} ->
-        {:noreply, new_state}
-
-      {:switch_channel, requested_channel, new_state} ->
-        {:ok, _request_id} =
-          App.ChannelSwitcher.request_switch(new_state.channel_switcher, requested_channel)
-
-        case App.ChannelSwitcher.begin_next_switch(new_state.channel_switcher) do
-          {:ok, request_id, channel} ->
-            {:noreply, do_begin_channel_switch(new_state, request_id, channel)}
-
-          :busy ->
-            {:noreply, new_state}
-
-          :none ->
-            {:noreply, new_state}
-        end
-    end
-  end
-
-  def handle_info(:quit, state) do
-    Logger.info("Q - quitting")
-    Osd.clear()
-
-    state =
-      state
-      |> App.Advance.clear_transition_state()
-      |> App.Preview.cancel_active_preview()
-      |> App.Persistence.persist_current_channel_position()
-      |> App.Playback.stop_current_item()
-
-    {:stop, :normal, state}
-  end
-
   def handle_info(_msg, state), do: {:noreply, state}
 
-  defp do_begin_channel_switch(state, request_id, requested_channel) do
-    Logger.info(
-      "do_begin_channel_switch: request_id=#{request_id} requested_channel=#{requested_channel.label}"
-    )
+  defp do_begin_channel_switch(state, seq, requested_channel) do
+    input_pid = state.input_pid
 
     state =
       state
@@ -2336,96 +3007,28 @@ defmodule App do
       App.Persistence.load_or_initialize_channel_position(state, requested_channel)
 
     case App.Playback.play_channel_item(state, requested_channel, file_index, offset_seconds) do
-      {:ok, new_state, actual_file_index} ->
-        actual_path = Enum.at(requested_channel.media, actual_file_index)
+      {:ok, new_state, _actual_file_index} ->
+        new_state =
+          new_state
+          |> Map.put(:switching?, false)
+          |> Map.put(:switching_seq, nil)
 
-        Logger.info(
-          "do_begin_channel_switch: started channel=#{requested_channel.label} actual_file=#{inspect(actual_path)} offset=#{offset_seconds}s request_id=#{request_id}"
-        )
+        send(input_pid, {:playback_started, requested_channel})
+        send(input_pid, {:switch_result, seq, :ok, requested_channel})
 
-        maybe_apply_or_cancel_stale_switch(new_state, request_id, requested_channel)
+        new_state
 
       {:error, new_state, reason} ->
-        Logger.error(
-          "do_begin_channel_switch: failed channel=#{requested_channel.label} reason=#{inspect(reason)} request_id=#{request_id}"
-        )
+        new_state =
+          new_state
+          |> Map.put(:switching?, false)
+          |> Map.put(:switching_seq, nil)
 
-        handle_channel_switch_failure(new_state, request_id)
+        send(input_pid, {:playback_failed, requested_channel, reason})
+        send(input_pid, {:switch_result, seq, {:error, reason}, requested_channel})
+
+        new_state
     end
-  end
-
-  defp maybe_apply_or_cancel_stale_switch(state, request_id, requested_channel) do
-    {latest_request_id, latest_channel} =
-      App.ChannelSwitcher.peek_latest(state.channel_switcher)
-
-    stale? =
-      latest_request_id != request_id or
-        not App.Util.same_channel?(latest_channel, requested_channel)
-
-    if stale? do
-      Logger.info(
-        "maybe_apply_or_cancel_stale_switch: stale started switch request_id=#{request_id} latest_request_id=#{inspect(latest_request_id)}; stopping just-started player"
-      )
-
-      state
-      |> App.Playback.stop_current_item()
-      |> handle_channel_switch_failure(request_id)
-    else
-      handle_channel_switch_completion(state, request_id)
-    end
-  end
-
-  defp handle_channel_switch_completion(state, request_id) do
-    case App.ChannelSwitcher.finish_switch(state.channel_switcher, request_id) do
-      :apply_current ->
-        App.Preview.clear_preview_state(state)
-
-      :stale_reschedule ->
-        schedule_immediate_commit()
-        state
-    end
-  end
-
-  defp handle_channel_switch_failure(state, request_id) do
-    case App.ChannelSwitcher.finish_switch(state.channel_switcher, request_id) do
-      :apply_current ->
-        state
-
-      :stale_reschedule ->
-        schedule_immediate_commit()
-        state
-    end
-  end
-
-  defp schedule_immediate_commit do
-    Process.send_after(self(), :commit_preview, 0)
-    :ok
-  end
-
-  defp build_init_state(mediadirs, catalog, channels, current_channel, saved_channel_state) do
-    %{
-      mediadirs: mediadirs,
-      catalog: catalog,
-      channels: channels,
-      current_channel: current_channel,
-      current_channel_id: App.Util.channel_id(current_channel),
-      current_file_index: nil,
-      current_player: nil,
-      preview_channel: nil,
-      requested_channel: nil,
-      preview_timer: nil,
-      preview_active?: false,
-      screen_off?: false,
-      channel_state: saved_channel_state,
-      runtime_sup: nil,
-      channel_switcher: nil,
-      image_display_timer: nil,
-      next_prepared: nil,
-      next_prepare_task: nil,
-      next_prepare_ref: nil,
-      next_requested_file_index: nil,
-      display_elapsed?: false
-    }
   end
 
   defp start_initial_playback(%{current_channel: nil} = state), do: state
@@ -2437,15 +3040,12 @@ defmodule App do
       App.Persistence.load_or_initialize_channel_position(state, channel)
 
     case App.Playback.play_channel_item(state, channel, file_index, offset_seconds) do
-      {:ok, new_state, actual_file_index} ->
-        actual_path = Enum.at(channel.media, actual_file_index)
-        Logger.info("current channel: #{channel.label}")
-        Logger.info("resume position: file=#{inspect(actual_path)} offset=#{offset_seconds}s")
-        Osd.show(channel.name)
+      {:ok, new_state, _actual_file_index} ->
+        send(state.input_pid, {:playback_started, channel})
         new_state
 
       {:error, new_state, reason} ->
-        Logger.error("startup play failed: #{inspect(reason)}")
+        send(state.input_pid, {:playback_failed, channel, reason})
         new_state
     end
   end
@@ -2462,6 +3062,93 @@ defmodule App do
       _ -> nil
     end
   end
+end
+
+defmodule App do
+  require Logger
+
+def main(argv) do
+  {opts, mediadirs, invalid} = OptionParser.parse(argv, strict: [scan: :boolean])
+
+  cond do
+    invalid != [] ->
+      usage("invalid options: #{inspect(invalid)}")
+
+    mediadirs == [] ->
+      usage("missing media dirs")
+
+    true ->
+      mediadirs = mediadirs |> Enum.map(&Path.expand/1) |> Enum.uniq()
+      scan? = Keyword.get(opts, :scan, false)
+
+      saved_state = StateStore.load!()
+      saved_channel_state = Map.fetch!(saved_state, "channel_state")
+      saved_current_channel_id = Map.fetch!(saved_state, "current_channel_id")
+
+      catalog = load_or_build_catalog!(mediadirs, scan?)
+      channels = active_channels_for_roots(catalog, mediadirs)
+
+      if channels == [] do
+        usage("no playable media found in supplied media dirs")
+      end
+
+      current_channel =
+        Enum.find(channels, fn channel ->
+          App.Util.channel_id(channel) == saved_current_channel_id
+        end) || List.first(channels)
+
+      case Power.tv_on() do
+        :ok ->
+          Logger.info("main: tv on")
+
+        {:error, reason} ->
+          Logger.error("main: tv on failed #{inspect(reason)}")
+      end
+
+      case Osd.start_link() do
+        {:ok, _osd_pid} -> :ok
+        {:error, {:already_started, _pid}} -> :ok
+      end
+
+      {:ok, input_pid} =
+        App.Input.start_link(
+          name: App.Input,
+          channels: channels,
+          current_channel: current_channel,
+          playback_owner: nil
+        )
+
+      {:ok, playback_owner} =
+        App.PlaybackOwner.start_link(
+          name: App.PlaybackOwner,
+          input_pid: input_pid,
+          current_channel: current_channel,
+          channel_state: saved_channel_state,
+          channels: channels
+        )
+
+      :sys.replace_state(App.Input, fn state ->
+        %{state | playback_owner: playback_owner}
+      end)
+
+      {:ok, runtime_sup} = RuntimeSupervisor.start_link(receiver: input_pid)
+
+      ref1 = Process.monitor(input_pid)
+      ref2 = Process.monitor(playback_owner)
+      ref3 = Process.monitor(runtime_sup)
+
+      receive do
+        {:DOWN, ^ref1, :process, ^input_pid, reason} ->
+          Logger.error("App.Input exited: #{inspect(reason)}")
+
+        {:DOWN, ^ref2, :process, ^playback_owner, reason} ->
+          Logger.error("App.PlaybackOwner exited: #{inspect(reason)}")
+
+        {:DOWN, ^ref3, :process, ^runtime_sup, reason} ->
+          Logger.error("RuntimeSupervisor exited: #{inspect(reason)}")
+      end
+  end
+end
 
   defp load_or_build_catalog!(mediadirs, true) do
     catalog =
@@ -2519,32 +3206,6 @@ defmodule App do
       end)
     end)
     |> Enum.sort_by(&{&1.root, &1.name, &1.path})
-  end
-
-  defp toggle_screen(%{screen_off?: true} = state), do: wake_screen(state)
-  defp toggle_screen(state), do: turn_screen_off(state)
-
-  defp turn_screen_off(state) do
-    state = App.Persistence.persist_current_channel_position(state)
-
-    case Power.tv_off() do
-      :ok -> Logger.info("tv off")
-      {:error, reason} -> Logger.error("tv off failed #{inspect(reason)}")
-    end
-
-    Map.put(state, :screen_off?, true)
-  end
-
-  defp wake_screen(state) do
-    case Power.tv_on() do
-      :ok ->
-        Logger.info("wake_screen: tv on")
-        Map.put(state, :screen_off?, false)
-
-      {:error, reason} ->
-        Logger.error("wake_screen: tv on failed #{inspect(reason)}")
-        state
-    end
   end
 
   defp usage(message) do
