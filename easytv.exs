@@ -3238,7 +3238,11 @@ defmodule App do
         usage("missing media dirs")
 
       true ->
-        mediadirs = mediadirs |> Enum.map(&Path.expand/1) |> Enum.uniq()
+        mediadirs =
+          mediadirs
+          |> Enum.map(&Path.expand/1)
+          |> Enum.uniq()
+
         scan? = Keyword.get(opts, :scan, false)
 
         saved_state = StateStore.load!()
@@ -3266,8 +3270,11 @@ defmodule App do
         end
 
         case Osd.start_link() do
-          {:ok, _osd_pid} -> :ok
-          {:error, {:already_started, _pid}} -> :ok
+          {:ok, _osd_pid} ->
+            :ok
+
+          {:error, {:already_started, _pid}} ->
+            :ok
         end
 
         {:ok, input_pid} =
@@ -3291,7 +3298,8 @@ defmodule App do
           %{state | playback_owner: playback_owner}
         end)
 
-        {:ok, runtime_sup} = RuntimeSupervisor.start_link(receiver: input_pid)
+        {:ok, runtime_sup} =
+          RuntimeSupervisor.start_link(receiver: input_pid)
 
         ref1 = Process.monitor(input_pid)
         ref2 = Process.monitor(playback_owner)
