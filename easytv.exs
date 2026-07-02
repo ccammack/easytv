@@ -781,9 +781,9 @@ defmodule MpvPlayer do
         #   "mpv request timed out request_id=#{request_id} tag=#{inspect(tag)} age_ms=#{age_ms} command=#{inspect(command)}"
         # )
 
-        if state.stopping? or state.switching? do
+        if state.stopping? do
           Logger.debug(
-            "mpv request timed out during stop/switch request_id=#{request_id} tag=#{inspect(tag)} age_ms=#{age_ms} command=#{inspect(command)}"
+            "mpv request timed out during stop request_id=#{request_id} tag=#{inspect(tag)} age_ms=#{age_ms} command=#{inspect(command)}"
           )
         else
           Logger.error(
@@ -2376,7 +2376,7 @@ defmodule App.Advance do
     actual_path = Enum.at(channel.media, file_index)
 
     Logger.info(
-      "advance_to_prepared_next channel=#{channel.label} file_index=#{file_index} actual_path=#{inspect(actual_path)} prepared_playpath=#{inspect(prepared.playpath)}"
+      "advance_to_prepared_next channel=#{channel.label} file_index=#{file_index} actual_path=#{inspect(actual_path)} prepared_playpath=#{inspect(prepared.play_path)}"
     )
 
     state =
