@@ -98,7 +98,8 @@ Put a set-default-sink line into /etc/pulse/default.pa so PulseAudio initializes
 
 ---
 
-Configure audio output. On the Pi 4B, `hdmi-0` is the one in the middle, next to the USB power port.
+Configure audio output on `hdmi-0` using `raspi-config`.
+On the Pi 4B, `hdmi-0` is the one in the middle, next to the USB power port.
 
 ```sh
 $ sudo raspi-config
@@ -106,32 +107,14 @@ $ sudo raspi-config
 # System Options -> Audio -> *-hdmi-0
 ```
 
-Lock the Pi's output to 720p by appending `video=HDMI-A-1:1280x720M@60` to the end of `/boot/firmware/cmdline.txt`:
+Configure video output on that port to 720p by appending `video=HDMI-A-1:1280x720` to the end of `/boot/firmware/cmdline.txt`:
 
 ``` sh
 $ sudo nano /boot/firmware/cmdline.txt
 [...]
 
 $ sudo cat /boot/firmware/cmdline.txt
-console=serial0,115200 console=tty1 root=PARTUUID=4ea15ea7-02 rootfstype=ext4 fsck.repair=yes rootwait ds=nocloud;i=rpi-imager-1778412046820 cfg80211.ieee80211_regdom=US video=HDMI-A-1:1280x720M@60
-```
-
-
-Lock the Pi's output to 1080p:
-
-``` sh
-$ sudo nano /boot/firmware/config.txt
-[...]
-
-$ sudo cat /boot/firmware/config.txt
-[...]
-
-[all]
-enable_uart=1
-
-hdmi_force_hotplug=1
-hdmi_group=1
-hdmi_mode=16
+console=serial0,115200 console=tty1 root=PARTUUID=4ea15ea7-02 rootfstype=ext4 fsck.repair=yes rootwait ds=nocloud;i=rpi-imager-1778412046820 cfg80211.ieee80211_regdom=US video=HDMI-A-1:1280x720
 ```
 
 Install prerequisites:
