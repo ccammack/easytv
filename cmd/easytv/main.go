@@ -17,10 +17,11 @@ import (
 
 // CEC access requires an explicit device path; headless mode uses null outputs.
 // Storage paths remain explicit to keep deployment separate from validation.
-func runWithBackendFactory(ctx context.Context, args []string, stdout, stderr io.Writer, factory func(string) cec.Backend) error {
+func runWithBackendFactory(ctx context.Context, args []string, stdout, stderr io.Writer, factory func(string) cec.Backend) (result error) {
 	flags := flag.NewFlagSet("easytv", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	headless := flags.Bool("headless", false, "use null audio/video outputs; CEC remains disabled unless explicitly selected")
+	osdEnabled := flags.Bool("osd", false, "enable aosd_cat channel previews; requires real output and an existing X session")
 	device := flags.String("cec-device", "", "explicit CEC device path; empty disables CEC in headless mode")
 	listen := flags.String("listen", "", "optional HTTP bind address, e.g. 127.0.0.1:8080; disabled when empty")
 	deviceName := flags.String("device-name", "rpi-tv", "device_name in the legacy HTTP protocol")
@@ -29,7 +30,7 @@ func runWithBackendFactory(ctx context.Context, args []string, stdout, stderr io
 	tempDir := flags.String("temp-dir", "", "explicit temporary workspace parent (required)")
 	runFor := flags.Duration("run-for", 0, "optional bounded runtime, such as 30s")
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, "usage: easytv [--headless] [--cec-device DEVICE] --state-dir DIR --temp-dir DIR [--scan] [--run-for DURATION] ROOT [ROOT ...]")
+		fmt.Fprintln(stderr, "usage: easytv [--headless] [--osd] [--cec-device DEVICE] --state-dir DIR --temp-dir DIR [--scan] [--run-for DURATION] ROOT [ROOT ...]")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
@@ -50,6 +51,11 @@ func runWithBackendFactory(ctx context.Context, args []string, stdout, stderr io
 	if *runFor < 0 {
 		return errors.New("--run-for must not be negative")
 	}
+	showPreview, closePreview, err := previewOutput(*headless, *osdEnabled, stderr)
+	if err != nil {
+		return err
+	}
+	defer func() { result = errors.Join(result, closePreview()) }()
 	var listener net.Listener
 	if *listen != "" {
 		var err error
@@ -65,7 +71,7 @@ func runWithBackendFactory(ctx context.Context, args []string, stdout, stderr io
 		runtimeCtx, cancel = context.WithTimeout(ctx, *runFor)
 	}
 	defer cancel()
-	config := app.RuntimeConfig{HTTPListener: listener, DeviceName: *deviceName, Roots: flags.Args(), StateDir: *stateDir, TempDir: *tempDir, Scan: *scan, Player: mpvplayer.Config{OutputArgs: playerOutputArgs(*headless)}, ClaimSource: func() error { return nil }, Show: func(channel string) { fmt.Fprintf(stderr, "headless channel preview: %s\n", channel) }, Report: func(err error) { fmt.Fprintf(stderr, "easytv: %v\n", err) }}
+	config := app.RuntimeConfig{HTTPListener: listener, DeviceName: *deviceName, Roots: flags.Args(), StateDir: *stateDir, TempDir: *tempDir, Scan: *scan, Player: mpvplayer.Config{OutputArgs: playerOutputArgs(*headless)}, ClaimSource: func() error { return nil }, Show: showPreview, Report: func(err error) { fmt.Fprintf(stderr, "easytv: %v\n", err) }}
 	ready := make(chan *app.Owner, 1)
 	finished := make(chan error, 1)
 	go func() {
@@ -101,7 +107,7 @@ func runWithBackendFactory(ctx context.Context, args []string, stdout, stderr io
 	case <-runtimeCtx.Done():
 		return finish(<-finished)
 	}
-	err := finish(<-finished)
+	err = finish(<-finished)
 	if err == nil {
 		fmt.Fprintf(stdout, "EasyTV %s runtime stopped\n", mode)
 	}

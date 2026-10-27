@@ -56,5 +56,7 @@ func (a *Coordinator) CommitPreview(sequence uint64, now time.Time) error {
 }
 func (a *Coordinator) Stop() error {
 	a.preview.Cancel()
+	// Empty text clears the owned overlay, including on source loss/shutdown.
+	a.show("")
 	return a.controller.Stop()
 }
