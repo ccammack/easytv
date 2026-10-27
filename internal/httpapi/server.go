@@ -21,6 +21,7 @@ type Backend interface {
 }
 
 type Server struct {
+	controls   PlaybackControls
 	mu         sync.Mutex
 	deviceName string
 	clients    map[*subscription]struct{}
@@ -34,6 +35,9 @@ func NewServer(deviceName string, backend Backend) *Server {
 }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /channel", s.channelHandler)
+	mux.HandleFunc("POST /volume", s.volumeHandler)
+	mux.HandleFunc("POST /mute", s.muteHandler)
 	mux.HandleFunc("GET /adapter", s.adapterHandler)
 	mux.HandleFunc("GET /events", s.eventsHandler)
 	mux.HandleFunc("GET /events.ndjson", s.ndjsonHandler)

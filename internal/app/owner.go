@@ -26,6 +26,8 @@ type Owner struct {
 }
 
 type OwnerCommand struct {
+	Volume    float64
+	Muted     bool
 	Kind      string // status, start, stop, channel, or cec
 	Direction int
 	Message   cec.ReceivedMessage
@@ -220,6 +222,19 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 			reason := ""
 			switch command.Kind {
 			case "status":
+			case "volume", "mute":
+				client := o.player.Client()
+				if !o.controller.Running() || client == nil {
+					err = errors.New("player not running")
+				} else {
+					commandCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+					if command.Kind == "volume" {
+						err = client.SetVolume(commandCtx, command.Volume)
+					} else {
+						err = client.SetMute(commandCtx, command.Muted)
+					}
+					cancel()
+				}
 			case "start":
 				err = o.controller.Start()
 			case "stop":

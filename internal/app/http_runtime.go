@@ -10,6 +10,7 @@ import (
 // serveOwner couples HTTP lifetime to playback. The supplied cancellation also
 // interrupts preparation work owned by RunRuntime.
 func serveOwner(ctx context.Context, cancel context.CancelFunc, owner *Owner, server *httpapi.Server, listener net.Listener) error {
+	server.SetPlaybackControls(ownerHTTPControls{owner: owner})
 	ownerDone, httpDone := make(chan error, 1), make(chan error, 1)
 	go func() { ownerDone <- owner.Run(ctx) }()
 	go func() { httpDone <- server.Serve(ctx, listener) }()

@@ -1,0 +1,61 @@
+package httpapi
+
+import (
+	"context"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+type fakeControls struct {
+	direction int
+	volume    float64
+	muted     bool
+	calls     int
+}
+
+func (c *fakeControls) ChangeChannel(_ context.Context, direction int) error {
+	c.direction = direction
+	c.calls++
+	return nil
+}
+func (c *fakeControls) SetVolume(_ context.Context, value float64) error {
+	c.volume = value
+	c.calls++
+	return nil
+}
+func (c *fakeControls) SetMute(_ context.Context, value bool) error {
+	c.muted = value
+	c.calls++
+	return nil
+}
+func TestPlaybackControlValidationAndDispatch(t *testing.T) {
+	controls := &fakeControls{}
+	server := NewServer("easytv", nil)
+	server.SetPlaybackControls(controls)
+	for _, test := range []struct {
+		path, body string
+		want       int
+	}{
+		{"/channel", `{"direction":"next"}`, 204}, {"/channel", `{"direction":"previous"}`, 204},
+		{"/channel", `{"direction":"up"}`, 400}, {"/channel", `{}`, 400},
+		{"/volume", `{"volume":25.5}`, 204}, {"/volume", `{"volume":0}`, 204},
+		{"/volume", `{"volume":101}`, 400}, {"/volume", `{"volume":-1}`, 400}, {"/volume", `{}`, 400},
+		{"/volume", `{"volume":null}`, 400}, {"/volume", `{"volume":25} {}`, 400},
+		{"/mute", `{"muted":true}`, 204}, {"/mute", `{"muted":false}`, 204},
+		{"/mute", `{"muted":null}`, 400}, {"/mute", `{"muted":"yes"}`, 400}, {"/mute", `{"muted":true,"extra":1}`, 400},
+	} {
+		before := controls.calls
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, httptest.NewRequest("POST", test.path, strings.NewReader(test.body)))
+		if response.Code != test.want {
+			t.Fatalf("%s %s status=%d", test.path, test.body, response.Code)
+		}
+		if test.want == 400 && controls.calls != before {
+			t.Fatal("invalid request dispatched")
+		}
+	}
+	if controls.direction != -1 || controls.volume != 0 || controls.muted || controls.calls != 6 || server.sequence != 0 {
+		t.Fatalf("controls=%+v", controls)
+	}
+}
