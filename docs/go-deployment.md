@@ -2,6 +2,12 @@
 
 These are instructions to review, not automatic installation or approval of physical-device tests. Documentation validation does not execute the examples.
 
+## Retired control scripts
+
+`volume.sh`, `power.sh`, and `channel.sh` have been removed. Go volume/mute uses mpv IPC; TV power and Active Source use the internal CEC service; channel changes use the serialized playback owner. No replacement shell hooks are required by the Go entrypoint.
+
+`easytv.exs` remains unmodified historical/reference source and still contains calls to the retired hooks. Do not treat that file alone as a runnable legacy rollback. Keep a complete backed-up working deployment or restore the matching historical revision, including its scripts, if rollback is required. This retirement does not update or remove any separately deployed copies outside this repository.
+
 ## Preserve the existing installation
 
 Record the current launcher, media roots, state path, X-session environment, audio route, and adapter selection. Keep a rollback launcher and backed-up legacy state. Use separate writable state/workspace paths for Go validation, never simultaneous writers to the same state directory.

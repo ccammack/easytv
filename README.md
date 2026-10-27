@@ -2,7 +2,9 @@
 
 EasyTV provides directory-based looping mpv channels for a Linux/Raspberry Pi appliance. The Go executable owns playback, persistence, optional Linux HDMI-CEC, optional HTTP controls/received-packet streams, and optional channel-preview overlays.
 
-This README describes `cmd/easytv`. `easytv.exs` remains a legacy/reference implementation. The Go entrypoint does not install the legacy evdev/FLIRC hotkey reader or call the legacy power/volume/channel scripts.
+This README describes `cmd/easytv`. `easytv.exs` is retained as historical/reference source. The obsolete `volume.sh`, `power.sh`, and `channel.sh` hooks have been removed; Go controls mpv and CEC internally. The Go entrypoint does not install legacy evdev/FLIRC input handling.
+
+The historical Elixir reference still contains calls to those retired hooks. It is not a runnable rollback package as checked out; use a complete backed-up deployment or restore a matching earlier revision if legacy rollback is needed.
 
 ## Validation boundary
 
