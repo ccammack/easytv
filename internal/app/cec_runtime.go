@@ -73,6 +73,9 @@ func RunCECRuntime(ctx context.Context, config RuntimeConfig, backend cec.Backen
 		return nil
 	case err := <-serviceDone:
 		serviceDone = nil
+		if err == nil && ctx.Err() != nil {
+			return nil
+		}
 		return fmt.Errorf("CEC service ended during startup: %w", err)
 	case err := <-runtimeDone:
 		runtimeDone = nil
@@ -88,6 +91,9 @@ func RunCECRuntime(ctx context.Context, config RuntimeConfig, backend cec.Backen
 			return nil
 		case err := <-serviceDone:
 			serviceDone = nil
+			if err == nil && ctx.Err() != nil {
+				return nil
+			}
 			return fmt.Errorf("CEC service ended before readiness: %w", err)
 		case err := <-runtimeDone:
 			runtimeDone = nil
@@ -99,19 +105,19 @@ func RunCECRuntime(ctx context.Context, config RuntimeConfig, backend cec.Backen
 		return nil
 	case err := <-serviceDone:
 		serviceDone = nil
-		if err == nil {
+		if err == nil && ctx.Err() == nil {
 			err = errors.New("CEC service ended unexpectedly")
 		}
 		return err
 	case err := <-runtimeDone:
 		runtimeDone = nil
-		if err == nil {
+		if err == nil && ctx.Err() == nil {
 			err = errors.New("playback runtime ended unexpectedly")
 		}
 		return err
 	case err := <-forwardDone:
 		forwardDone = nil
-		if err == nil {
+		if err == nil && ctx.Err() == nil {
 			err = errors.New("CEC observation forwarding ended unexpectedly")
 		}
 		return err
