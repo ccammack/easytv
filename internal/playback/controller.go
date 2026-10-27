@@ -77,36 +77,47 @@ func (c *Controller) Snapshot() state.State { return clone(c.saved) }
 func (c *Controller) Running() bool         { return c.running }
 func (c *Controller) Generation() uint64    { return c.generation }
 
-// Start launches the selected channel at its saved file and offset.
-// Unknown saved paths fall back to the first file with offset zero.
+// Start launches the selected channel, trying each item at most once.
+// As in the reference, preparation/start failures fall through to the next
+// candidate. Unknown saved paths start at the first item with offset zero.
 func (c *Controller) Start() error {
 	if c.running {
 		return nil
 	}
 	ch := c.channels[c.selected]
-	path, offset := ch.Media[0], int64(0)
+	index, offset := 0, int64(0)
 	old := c.saved.ChannelState[ch.Path]
 	if old.FilePath != nil {
-		for _, candidate := range ch.Media {
-			if candidate == *old.FilePath {
-				path = candidate
+		for i, path := range ch.Media {
+			if path == *old.FilePath {
+				index = i
 				offset = old.OffsetSeconds
 				break
 			}
 		}
 	}
-	if preparedmedia.IsImage(path) {
+	if preparedmedia.IsImage(ch.Media[index]) {
 		offset = 0
 	}
-	c.generation++
-	if err := c.player.Start(path, offset, c.generation); err != nil {
-		return fmt.Errorf("start player: %w", err)
+	var failures []error
+	for attempt := 0; attempt < len(ch.Media); attempt++ {
+		path := ch.Media[(index+attempt)%len(ch.Media)]
+		startOffset := offset
+		if preparedmedia.IsImage(path) {
+			startOffset = 0
+		}
+		c.generation++
+		if err := c.player.Start(path, startOffset, c.generation); err != nil {
+			failures = append(failures, fmt.Errorf("start %q: %w", path, err))
+			continue
+		}
+		id := ch.Path
+		c.saved.CurrentChannelID = &id
+		c.saved.ChannelState[id] = state.Position{FilePath: &path, OffsetSeconds: startOffset}
+		c.running = true
+		return nil
 	}
-	id := ch.Path
-	c.saved.CurrentChannelID = &id
-	c.saved.ChannelState[id] = state.Position{FilePath: &path, OffsetSeconds: offset}
-	c.running = true
-	return nil
+	return fmt.Errorf("no playable files in channel %q: %w", ch.Path, errors.Join(failures...))
 }
 
 // RecordPosition ignores events from old players and keeps a three-second
