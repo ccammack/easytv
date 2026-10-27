@@ -24,7 +24,7 @@ func TestChannelSwitchSavesAndRestoresPositions(t *testing.T) {
 	if c.SelectedChannelID() != "/b" || p.path != "/b/video.mp4" || p.offset != 0 || p.stops != 1 || claims != 1 {
 		t.Fatalf("player=%+v claims=%d", p, claims)
 	}
-	if len(saves) != 1 || saves[0].ChannelState["/a"].OffsetSeconds != 40 {
+	if len(saves) != 3 || saves[1].ChannelState["/a"].OffsetSeconds != 40 || saves[2].CurrentChannelID == nil || *saves[2].CurrentChannelID != "/b" {
 		t.Fatal(saves)
 	}
 	c.RecordPosition(c.Generation(), 23)
@@ -89,7 +89,8 @@ func TestRejectedChannelCommandDoesNotDisturbPlayback(t *testing.T) {
 	for _, scenario := range []string{"unknown", "nil claim", "claim failure"} {
 		t.Run(scenario, func(t *testing.T) {
 			p := &fakePlayer{}
-			c := makeController(t, state.Default(), p, func(state.State) error { t.Fatal("unexpected save"); return nil })
+			saveCalls := 0
+			c := makeController(t, state.Default(), p, func(state.State) error { saveCalls++; return nil })
 			if err := c.Start(); err != nil {
 				t.Fatal(err)
 			}
@@ -113,7 +114,7 @@ func TestRejectedChannelCommandDoesNotDisturbPlayback(t *testing.T) {
 			if scenario == "unknown" && calls != 0 {
 				t.Fatal("unknown channel asserted AS")
 			}
-			if p.starts != 1 || p.stops != 0 || !reflect.DeepEqual(before, c.Snapshot()) {
+			if p.starts != 1 || p.stops != 0 || saveCalls != 1 || !reflect.DeepEqual(before, c.Snapshot()) {
 				t.Fatal("rejected command changed playback")
 			}
 		})
@@ -133,15 +134,22 @@ func TestStopFailurePreventsNewPlayer(t *testing.T) {
 	}
 }
 
-func TestSaveFailureAbortsSwitchAfterStopping(t *testing.T) {
+func TestSaveFailureDoesNotAbortSwitchAfterStopping(t *testing.T) {
 	failure := errors.New("save failed")
 	p := &fakePlayer{}
-	c := makeController(t, state.Default(), p, func(state.State) error { return failure })
+	failSave := false
+	c := makeController(t, state.Default(), p, func(state.State) error {
+		if failSave {
+			return failure
+		}
+		return nil
+	})
 	if err := c.Start(); err != nil {
 		t.Fatal(err)
 	}
+	failSave = true
 	err := c.NextChannel(func() error { return nil })
-	if !errors.Is(err, failure) || c.Running() || p.starts != 1 || p.stops != 1 || c.SelectedChannelID() != "/a" {
+	if !errors.Is(err, failure) || !c.Running() || p.starts != 2 || p.stops != 1 || c.SelectedChannelID() != "/b" {
 		t.Fatalf("err=%v player=%+v", err, p)
 	}
 }

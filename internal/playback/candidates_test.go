@@ -48,7 +48,8 @@ func TestAllCandidatesFailOnceWithoutStateMutation(t *testing.T) {
 	first, second := errors.New("first failure"), errors.New("second failure")
 	saved := state.Default()
 	p := &candidatePlayer{fail: map[string]error{"/a/one.mp4": first, "/a/two.mp4": second}}
-	c, err := New(channels(), saved, p, func(state.State) error { t.Fatal("failed startup saved state"); return nil })
+	saveCalls := 0
+	c, err := New(channels(), saved, p, func(state.State) error { saveCalls++; return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,11 +58,11 @@ func TestAllCandidatesFailOnceWithoutStateMutation(t *testing.T) {
 	if !errors.Is(err, first) || !errors.Is(err, second) {
 		t.Fatal(err)
 	}
-	if len(p.paths) != 2 || c.Running() || !reflect.DeepEqual(before, c.Snapshot()) {
+	if len(p.paths) != 2 || c.Running() || saveCalls != 0 || !reflect.DeepEqual(before, c.Snapshot()) {
 		t.Fatal("unbounded attempt or failed startup state mutation")
 	}
 	delete(p.fail, "/a/two.mp4")
-	if err := c.Start(); err != nil || !c.Running() {
+	if err := c.Start(); err != nil || !c.Running() || saveCalls != 1 {
 		t.Fatalf("retry failed: %v", err)
 	}
 }
@@ -79,7 +80,7 @@ func TestAdvanceSkipsUnplayableNextItem(t *testing.T) {
 	if err := c.Advance(c.Generation()); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(p.paths, []string{"/a/one.mp4", "/a/two.mp4", "/a/one.mp4"}) || p.stops != 1 || saves != 1 {
+	if !reflect.DeepEqual(p.paths, []string{"/a/one.mp4", "/a/two.mp4", "/a/one.mp4"}) || p.stops != 1 || saves != 2 {
 		t.Fatalf("paths=%v stops=%d saves=%d", p.paths, p.stops, saves)
 	}
 }

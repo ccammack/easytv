@@ -49,6 +49,11 @@ func setup(t *testing.T) *fixture {
 	if err := f.controller.Start(); err != nil {
 		t.Fatal(err)
 	}
+	// Scenario assertions count saves after the separately verified startup save.
+	if f.saves != 1 {
+		t.Fatal("startup was not persisted")
+	}
+	f.saves = 0
 	return f
 }
 func TestRapidRequestsClaimImmediatelyButCommitOnce(t *testing.T) {
@@ -74,7 +79,7 @@ func TestRapidRequestsClaimImmediatelyButCommitOnce(t *testing.T) {
 	if err := f.app.CommitPreview(second.Sequence, second.Due); err != nil {
 		t.Fatal(err)
 	}
-	if f.player.path != "c.mp4" || f.player.starts != 2 || f.player.stops != 1 || f.claims != 2 || f.saves != 1 {
+	if f.player.path != "c.mp4" || f.player.starts != 2 || f.player.stops != 1 || f.claims != 2 || f.saves != 2 {
 		t.Fatalf("fixture=%+v player=%+v", f, f.player)
 	}
 }

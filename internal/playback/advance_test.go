@@ -31,8 +31,8 @@ func TestAdvanceWrapsAndIgnoresDuplicateTerminalEvents(t *testing.T) {
 			t.Fatal("stale terminal/position changed new playback")
 		}
 	}
-	if saves != 3 {
-		t.Fatalf("saves=%d want=3", saves)
+	if saves != 4 {
+		t.Fatalf("saves=%d want=4", saves)
 	}
 	if err := c.Stop(); err != nil {
 		t.Fatal(err)
@@ -67,10 +67,17 @@ func TestAdvanceStopFailureDoesNotLaunchReplacement(t *testing.T) {
 func TestAdvanceSaveFailureKeepsNewPlaybackRunning(t *testing.T) {
 	failure := errors.New("disk failed")
 	p := &fakePlayer{}
-	c := makeController(t, state.Default(), p, func(state.State) error { return failure })
+	failSave := false
+	c := makeController(t, state.Default(), p, func(state.State) error {
+		if failSave {
+			return failure
+		}
+		return nil
+	})
 	if err := c.Start(); err != nil {
 		t.Fatal(err)
 	}
+	failSave = true
 	if err := c.Advance(c.Generation()); !errors.Is(err, failure) {
 		t.Fatal(err)
 	}

@@ -57,17 +57,17 @@ func TestSaveStopAndRestart(t *testing.T) {
 	if err := c.Stop(); err != nil {
 		t.Fatal(err)
 	}
-	if c.Running() || p.stops != 1 || len(saves) != 1 || saves[0].ChannelState["/a"].OffsetSeconds != 39 {
+	if c.Running() || p.stops != 1 || len(saves) != 2 || saves[1].ChannelState["/a"].OffsetSeconds != 39 {
 		t.Fatalf("saves=%v stops=%d", saves, p.stops)
 	}
-	if !reflect.DeepEqual(order, []string{"save", "stop"}) {
+	if !reflect.DeepEqual(order, []string{"save", "save", "stop"}) {
 		t.Fatal(order)
 	}
 	c.RecordPosition(gen, 999)
 	if err := c.Stop(); err != nil {
 		t.Fatal(err)
 	}
-	if len(saves) != 1 || p.stops != 1 {
+	if len(saves) != 2 || p.stops != 1 {
 		t.Fatal("repeated stop performed work")
 	}
 	if err := c.Start(); err != nil {
@@ -111,10 +111,17 @@ func TestRestoreAndMissingFile(t *testing.T) {
 func TestSaveFailureStillStops(t *testing.T) {
 	failure := errors.New("disk failed")
 	p := &fakePlayer{}
-	c := makeController(t, state.Default(), p, func(state.State) error { return failure })
+	failSave := false
+	c := makeController(t, state.Default(), p, func(state.State) error {
+		if failSave {
+			return failure
+		}
+		return nil
+	})
 	if err := c.Start(); err != nil {
 		t.Fatal(err)
 	}
+	failSave = true
 	if err := c.Stop(); !errors.Is(err, failure) || p.stops != 1 || c.Running() {
 		t.Fatalf("err=%v player=%+v", err, p)
 	}

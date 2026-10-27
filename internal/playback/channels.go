@@ -1,6 +1,9 @@
 package playback
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // ClaimSource is supplied by the application CEC owner. These methods execute
 // committed channel actions; preview/debounce scheduling belongs above them.
@@ -30,11 +33,14 @@ func (c *Controller) SelectChannel(id string, claim ClaimSource) error {
 	if target == c.selected {
 		return c.Start()
 	}
-	if err := c.Stop(); err != nil {
-		return fmt.Errorf("stop before channel change: %w", err)
+	stopErr := c.Stop()
+	// Only a child-stop failure blocks replacement; failed persistence must
+	// remain visible without turning a successful stop into a failed switch.
+	if c.running {
+		return fmt.Errorf("stop before channel change: %w", stopErr)
 	}
 	c.selected = target
-	return c.Start()
+	return errors.Join(stopErr, c.Start())
 }
 
 func (c *Controller) NextChannel(claim ClaimSource) error {

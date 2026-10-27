@@ -115,6 +115,11 @@ func (c *Controller) Start() error {
 		c.saved.CurrentChannelID = &id
 		c.saved.ChannelState[id] = state.Position{FilePath: &path, OffsetSeconds: startOffset}
 		c.running = true
+		// Persist the actual original path and restored offset before returning.
+		// A save failure is diagnostic: the successfully started child stays owned.
+		if err := c.save(clone(c.saved)); err != nil {
+			return fmt.Errorf("save started playback: %w", err)
+		}
 		return nil
 	}
 	return fmt.Errorf("no playable files in channel %q: %w", ch.Path, errors.Join(failures...))

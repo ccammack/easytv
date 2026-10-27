@@ -30,12 +30,7 @@ func (c *Controller) Advance(generation uint64) error {
 	}
 	path := ch.Media[next]
 	c.saved.ChannelState[ch.Path] = state.Position{FilePath: &path, OffsetSeconds: 0}
-	if err := c.Start(); err != nil {
-		return err
-	}
-	// As in the reference, a persistence failure must not stop new playback.
-	if err := c.save(clone(c.saved)); err != nil {
-		return fmt.Errorf("save advanced position: %w", err)
-	}
-	return nil
+	// Start persists the actual successful candidate once and leaves it
+	// running if the save fails; the owner reports the returned diagnostic.
+	return c.Start()
 }
