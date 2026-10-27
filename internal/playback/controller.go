@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/ccammack/easytv/internal/catalog"
+	"github.com/ccammack/easytv/internal/preparedmedia"
 	"github.com/ccammack/easytv/internal/state"
 )
 
@@ -94,6 +95,9 @@ func (c *Controller) Start() error {
 			}
 		}
 	}
+	if preparedmedia.IsImage(path) {
+		offset = 0
+	}
 	c.generation++
 	if err := c.player.Start(path, offset, c.generation); err != nil {
 		return fmt.Errorf("start player: %w", err)
@@ -117,6 +121,9 @@ func (c *Controller) RecordPosition(generation uint64, seconds int64) {
 	}
 	id := c.channels[c.selected].Path
 	p := c.saved.ChannelState[id]
+	if p.FilePath != nil && preparedmedia.IsImage(*p.FilePath) {
+		offset = 0
+	}
 	p.OffsetSeconds = offset
 	c.saved.ChannelState[id] = p
 }

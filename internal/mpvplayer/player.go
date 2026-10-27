@@ -5,16 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"github.com/ccammack/easytv/internal/mpvipc"
+	"github.com/ccammack/easytv/internal/preparedmedia"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"time"
 )
 
 // Player has one serialized owner. Stop waits for process exit.
 type Config struct {
+	Prepare        func(context.Context, string) (preparedmedia.Result, error)
 	Executable     string
 	OutputArgs     []string
 	StartupTimeout time.Duration
@@ -83,6 +84,20 @@ func (p *Player) Start(file string, offset int64, generation uint64) (result err
 	if err != nil {
 		return err
 	}
+	original := absolute
+	if p.config.Prepare != nil {
+		prepared, prepareErr := p.config.Prepare(context.Background(), original)
+		if prepareErr != nil {
+			return fmt.Errorf("prepare media: %w", prepareErr)
+		}
+		if prepared.PlayPath == "" {
+			return errors.New("empty prepared playback path")
+		}
+		absolute, err = filepath.Abs(prepared.PlayPath)
+		if err != nil {
+			return err
+		}
+	}
 	p.dir, err = os.MkdirTemp("/tmp", "etv-player-")
 	if err != nil {
 		return err
@@ -111,7 +126,8 @@ func (p *Player) Start(file string, offset int64, generation uint64) (result err
 	if err != nil {
 		return err
 	}
-	args := []string{"--no-config", "--no-terminal", "--idle=no", "--no-input-default-bindings", "--input-ipc-server=" + socket, "--start=" + strconv.FormatInt(offset, 10)}
+	args := []string{"--no-config", "--no-terminal", "--idle=no", "--no-input-default-bindings", "--input-ipc-server=" + socket}
+	args = append(args, mediaArguments(original, offset)...)
 	args = append(args, p.config.OutputArgs...)
 	args = append(args, "--", absolute)
 	cmd := exec.Command(p.config.Executable, args...)
