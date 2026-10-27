@@ -9,6 +9,7 @@ import (
 	"github.com/ccammack/easytv/internal/cec"
 	"github.com/ccammack/easytv/internal/mpvplayer"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -21,6 +22,8 @@ func runWithBackendFactory(ctx context.Context, args []string, stdout, stderr io
 	flags.SetOutput(stderr)
 	headless := flags.Bool("headless", false, "use null audio/video outputs; CEC remains disabled unless explicitly selected")
 	device := flags.String("cec-device", "", "explicit CEC device path; empty disables CEC in headless mode")
+	listen := flags.String("listen", "", "optional HTTP bind address, e.g. 127.0.0.1:8080; disabled when empty")
+	deviceName := flags.String("device-name", "rpi-tv", "device_name in the legacy HTTP protocol")
 	scan := flags.Bool("scan", false, "rebuild the catalog for supplied media roots")
 	stateDir := flags.String("state-dir", "", "explicit isolated state/catalog directory (required)")
 	tempDir := flags.String("temp-dir", "", "explicit temporary workspace parent (required)")
@@ -47,13 +50,22 @@ func runWithBackendFactory(ctx context.Context, args []string, stdout, stderr io
 	if *runFor < 0 {
 		return errors.New("--run-for must not be negative")
 	}
+	var listener net.Listener
+	if *listen != "" {
+		var err error
+		listener, err = net.Listen("tcp", *listen)
+		if err != nil {
+			return fmt.Errorf("listen: %w", err)
+		}
+		defer listener.Close()
+	}
 	runtimeCtx, cancel := context.WithCancel(ctx)
 	if *runFor > 0 {
 		cancel()
 		runtimeCtx, cancel = context.WithTimeout(ctx, *runFor)
 	}
 	defer cancel()
-	config := app.RuntimeConfig{Roots: flags.Args(), StateDir: *stateDir, TempDir: *tempDir, Scan: *scan, Player: mpvplayer.Config{OutputArgs: playerOutputArgs(*headless)}, ClaimSource: func() error { return nil }, Show: func(channel string) { fmt.Fprintf(stderr, "headless channel preview: %s\n", channel) }, Report: func(err error) { fmt.Fprintf(stderr, "easytv: %v\n", err) }}
+	config := app.RuntimeConfig{HTTPListener: listener, DeviceName: *deviceName, Roots: flags.Args(), StateDir: *stateDir, TempDir: *tempDir, Scan: *scan, Player: mpvplayer.Config{OutputArgs: playerOutputArgs(*headless)}, ClaimSource: func() error { return nil }, Show: func(channel string) { fmt.Fprintf(stderr, "headless channel preview: %s\n", channel) }, Report: func(err error) { fmt.Fprintf(stderr, "easytv: %v\n", err) }}
 	ready := make(chan *app.Owner, 1)
 	finished := make(chan error, 1)
 	go func() {
@@ -81,6 +93,9 @@ func runWithBackendFactory(ctx context.Context, args []string, stdout, stderr io
 			return errors.Join(err, status.Err, finish(<-finished))
 		}
 		fmt.Fprintf(stdout, "EasyTV %s runtime ready; running=%v\n", mode, status.Running)
+		if listener != nil {
+			fmt.Fprintf(stdout, "HTTP listening=%s (no built-in authentication or TLS)\n", listener.Addr())
+		}
 	case err := <-finished:
 		return finish(err)
 	case <-runtimeCtx.Done():

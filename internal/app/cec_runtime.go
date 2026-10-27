@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/ccammack/easytv/internal/cec"
+	"github.com/ccammack/easytv/internal/httpapi"
 )
 
 // RunCECRuntime supervises adapter ownership and playback as one lifecycle.
@@ -64,6 +65,9 @@ func RunCECRuntime(ctx context.Context, config RuntimeConfig, backend cec.Backen
 		}
 	}()
 	config.ClaimSource = func() error { return service.ClaimActiveSource(runCtx) }
+	if config.HTTPListener != nil {
+		config.httpServer = httpapi.NewServer(config.DeviceName, service)
+	}
 	ownerReady := make(chan *Owner, 1)
 	runtimeDone = make(chan error, 1)
 	go func() { runtimeDone <- RunRuntime(runCtx, config, ownerReady) }()
@@ -82,8 +86,12 @@ func RunCECRuntime(ctx context.Context, config RuntimeConfig, backend cec.Backen
 		return err
 	case owner = <-ownerReady:
 	}
+	var forwardOwner OwnerSubmitter = owner
+	if config.httpServer != nil {
+		forwardOwner = &streamPublishingOwner{owner: owner, server: config.httpServer}
+	}
 	forwardDone = make(chan error, 1)
-	go func() { forwardDone <- ForwardCEC(runCtx, service.Observations(), owner, config.Report) }()
+	go func() { forwardDone <- ForwardCEC(runCtx, service.Observations(), forwardOwner, config.Report) }()
 	if ready != nil {
 		select {
 		case ready <- owner:

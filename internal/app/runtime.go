@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"github.com/ccammack/easytv/internal/catalog"
+	"github.com/ccammack/easytv/internal/httpapi"
 	"github.com/ccammack/easytv/internal/mpvplayer"
 	"github.com/ccammack/easytv/internal/playback"
 	"github.com/ccammack/easytv/internal/preparedmedia"
 	"github.com/ccammack/easytv/internal/state"
+	"net"
 	"os"
 	"path/filepath"
 )
@@ -16,20 +18,28 @@ import (
 // RuntimeConfig requires explicit storage paths and injected side effects.
 // Hardware opening and executable defaults belong to the eventual entrypoint.
 type RuntimeConfig struct {
-	Roots       []string
-	StateDir    string
-	TempDir     string
-	Scan        bool
-	Player      mpvplayer.Config
-	ClaimSource playback.ClaimSource
-	Show        func(string)
-	Report      func(error)
+	HTTPListener net.Listener
+	DeviceName   string
+	httpServer   *httpapi.Server
+	Roots        []string
+	StateDir     string
+	TempDir      string
+	Scan         bool
+	Player       mpvplayer.Config
+	ClaimSource  playback.ClaimSource
+	Show         func(string)
+	Report       func(error)
 }
 
 // RunRuntime assembles and runs the owner, then joins preparation work and
 // removes only its own temporary directory. The optional ready channel receives
 // the owner so external producers can Submit commands; it is not closed here.
 func RunRuntime(ctx context.Context, config RuntimeConfig, ready chan<- *Owner) (result error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if config.HTTPListener != nil {
+		defer config.HTTPListener.Close()
+	}
 	if len(config.Roots) == 0 || config.StateDir == "" || config.TempDir == "" {
 		return errors.New("media roots and explicit state/temp directories required")
 	}
@@ -123,5 +133,12 @@ func RunRuntime(ctx context.Context, config RuntimeConfig, ready chan<- *Owner) 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return owner.Run(ctx)
+	if config.HTTPListener == nil {
+		return owner.Run(ctx)
+	}
+	server := config.httpServer
+	if server == nil {
+		server = httpapi.NewServer(config.DeviceName, nil)
+	}
+	return serveOwner(ctx, cancel, owner, server, config.HTTPListener)
 }
