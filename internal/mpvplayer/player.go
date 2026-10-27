@@ -2,6 +2,7 @@ package mpvplayer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/ccammack/easytv/internal/mpvipc"
@@ -75,6 +76,15 @@ func (p *Player) cleanup() {
 	p.dir = ""
 }
 func (p *Player) Start(file string, offset int64, generation uint64) (result error) {
+	return p.StartContext(context.Background(), file, offset, generation)
+}
+
+func (p *Player) StartContext(parent context.Context, file string, offset int64, generation uint64) (result error) {
+	ctx, cancel := context.WithTimeout(parent, p.config.StartupTimeout)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if p.cmd != nil {
 		return errors.New("previous player must be stopped before start")
 	}
@@ -87,7 +97,7 @@ func (p *Player) Start(file string, offset int64, generation uint64) (result err
 	}
 	original := absolute
 	if p.config.Prepare != nil || p.prefetched != nil {
-		prepared, prepareErr := p.takePrepared(original)
+		prepared, prepareErr := p.takePrepared(ctx, original)
 		if prepareErr != nil {
 			return fmt.Errorf("prepare media: %w", prepareErr)
 		}
@@ -128,10 +138,9 @@ func (p *Player) Start(file string, offset int64, generation uint64) (result err
 	if err != nil {
 		return err
 	}
-	args := []string{"--no-config", "--no-terminal", "--idle=no", "--no-input-default-bindings", "--input-ipc-server=" + socket}
+	args := []string{"--no-config", "--no-terminal", "--idle=once", "--no-input-default-bindings", "--input-ipc-server=" + socket}
 	args = append(args, mediaArguments(original, offset)...)
 	args = append(args, p.config.OutputArgs...)
-	args = append(args, "--", absolute)
 	cmd := exec.Command(p.config.Executable, args...)
 	cmd.Stdout = p.log
 	cmd.Stderr = p.log
@@ -142,8 +151,6 @@ func (p *Player) Start(file string, offset int64, generation uint64) (result err
 	p.done = make(chan struct{})
 	p.waitErr = nil
 	go func() { p.waitErr = cmd.Wait(); close(p.done) }()
-	ctx, cancel := context.WithTimeout(context.Background(), p.config.StartupTimeout)
-	defer cancel()
 	var conn net.Conn
 	for {
 		select {
@@ -161,8 +168,30 @@ func (p *Player) Start(file string, offset int64, generation uint64) (result err
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
-	// Reference startup readiness is IPC connectivity, not file-loaded.
 	p.client = mpvipc.New(conn)
+	if _, err := p.client.Call(ctx, "loadfile", absolute, "replace"); err != nil {
+		return fmt.Errorf("load mpv media: %w", err)
+	}
+	for {
+		raw, err := p.client.NextEvent(ctx)
+		if err != nil {
+			return fmt.Errorf("wait for mpv media load: %w", err)
+		}
+		var event struct {
+			Event  string `json:"event"`
+			Reason string `json:"reason"`
+			Error  string `json:"error"`
+		}
+		if err := json.Unmarshal(raw, &event); err != nil {
+			return fmt.Errorf("decode mpv startup event: %w", err)
+		}
+		if event.Event == "end-file" {
+			return fmt.Errorf("mpv failed to load media: reason=%s error=%s", event.Reason, event.Error)
+		}
+		if event.Event == "file-loaded" {
+			break
+		}
+	}
 	p.generation = generation
 	success = true
 	return nil

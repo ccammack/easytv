@@ -74,3 +74,29 @@ func TestSessionRequiresActivePlayer(t *testing.T) {
 		t.Fatal("invalid session accepted")
 	}
 }
+
+func TestSessionPreservesMediaErrorReason(t *testing.T) {
+	a, b := net.Pipe()
+	client := mpvipc.New(a)
+	defer client.Close()
+	defer b.Close()
+	session := Session{client: client, done: make(chan struct{}), generation: 7}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	out := make(chan Event, 1)
+	done := make(chan error, 1)
+	go func() { done <- session.Watch(ctx, out) }()
+	if _, err := fmt.Fprintln(b, `{"event":"end-file","reason":"error","error":"unrecognized file format"}`); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case event := <-out:
+		if event.Kind != "end-file" || event.Reason != "error" || event.Err == nil {
+			t.Fatalf("media error lost: %+v", event)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	cancel()
+	<-done
+}

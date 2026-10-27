@@ -34,11 +34,11 @@ func (p *Player) QueuePrepared(result preparedmedia.Result) error {
 	return nil
 }
 
-func (p *Player) takePrepared(original string) (preparedmedia.Result, error) {
+func (p *Player) takePrepared(ctx context.Context, original string) (preparedmedia.Result, error) {
 	prepared := p.prefetched
 	p.prefetched = nil
 	if prepared != nil && prepared.OriginalPath == original {
 		return *prepared, nil
 	}
-	return p.PrepareMedia(context.Background(), original)
+	return p.PrepareMedia(ctx, original)
 }

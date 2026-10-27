@@ -84,8 +84,8 @@ func TestRealPlayerControllerAdvance(t *testing.T) {
 		}
 		t.Logf("transition=%d advanced and saved; old child reaped; duplicate ignored", i+1)
 	}
-	if saves != 4 {
-		t.Fatalf("saves=%d want=4", saves)
+	if saves != 5 {
+		t.Fatalf("saves=%d want=5", saves)
 	}
 	if err := c.Stop(); err != nil {
 		t.Fatal(err)

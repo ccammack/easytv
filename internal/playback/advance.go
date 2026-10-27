@@ -1,6 +1,7 @@
 package playback
 
 import (
+	"errors"
 	"fmt"
 	"github.com/ccammack/easytv/internal/state"
 )
@@ -32,5 +33,10 @@ func (c *Controller) Advance(generation uint64) error {
 	c.saved.ChannelState[ch.Path] = state.Position{FilePath: &path, OffsetSeconds: 0}
 	// Start persists the actual successful candidate once and leaves it
 	// running if the save fails; the owner reports the returned diagnostic.
-	return c.Start()
+	err := c.Start()
+	if err != nil && !c.running {
+		c.saved.ChannelState[ch.Path] = old
+		return errors.Join(err, c.save(c.Snapshot()))
+	}
+	return err
 }

@@ -67,6 +67,7 @@ func (s Session) Watch(ctx context.Context, out chan<- Event) error {
 			var message struct {
 				Event  string `json:"event"`
 				Reason string `json:"reason"`
+				Error  string `json:"error"`
 			}
 			if err := json.Unmarshal(raw, &message); err != nil {
 				send(Event{Kind: "ipc-closed", Err: err})
@@ -76,7 +77,11 @@ func (s Session) Watch(ctx context.Context, out chan<- Event) error {
 			if message.Event == "end-file" {
 				kind = "end-file"
 			}
-			if !send(Event{Kind: kind, Reason: message.Reason, Raw: raw}) {
+			var mediaErr error
+			if message.Error != "" {
+				mediaErr = fmt.Errorf("mpv media error: %s", message.Error)
+			}
+			if !send(Event{Kind: kind, Reason: message.Reason, Raw: raw, Err: mediaErr}) {
 				return
 			}
 		}

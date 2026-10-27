@@ -35,7 +35,7 @@ func TestStartSkipsFailedCandidatesAndKeepsActualPath(t *testing.T) {
 	if err := c.Start(); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(p.paths, []string{first, "/a/two.mp4"}) || !reflect.DeepEqual(p.offsets, []int64{17, 17}) {
+	if !reflect.DeepEqual(p.paths, []string{first, "/a/two.mp4"}) || !reflect.DeepEqual(p.offsets, []int64{17, 0}) {
 		t.Fatalf("paths=%v offsets=%v", p.paths, p.offsets)
 	}
 	actual := c.Snapshot().ChannelState["/a"]

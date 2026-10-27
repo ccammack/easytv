@@ -125,10 +125,10 @@ func TestFallbackPersistsOnlyActualSuccessfulCandidate(t *testing.T) {
 	if err := c.Start(); err != nil {
 		t.Fatal(err)
 	}
-	if len(persisted) != 1 || persisted[0].ChannelState["/a"].FilePath == nil || *persisted[0].ChannelState["/a"].FilePath != "/a/two.mp4" || persisted[0].ChannelState["/a"].OffsetSeconds != 17 {
+	if len(persisted) != 1 || persisted[0].ChannelState["/a"].FilePath == nil || *persisted[0].ChannelState["/a"].FilePath != "/a/two.mp4" || persisted[0].ChannelState["/a"].OffsetSeconds != 0 {
 		t.Fatal(persisted)
 	}
-	if !reflect.DeepEqual(p.offsets, []int64{17, 17}) {
+	if !reflect.DeepEqual(p.offsets, []int64{17, 0}) {
 		t.Fatal(p.offsets)
 	}
 }

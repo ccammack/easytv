@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -107,17 +108,35 @@ func TestRealPlayerBadMediaCleansResources(t *testing.T) {
 	defer p.Stop()
 	err := p.Start(filepath.Join(t.TempDir(), "missing.wav"), 0, 1)
 	if err == nil {
-		select {
-		case <-p.done:
-		case <-time.After(3 * time.Second):
-			t.Fatal("missing media did not terminate mpv")
-		}
-		if err := p.Stop(); err != nil {
-			t.Fatal(err)
-		}
+		t.Fatal("IPC connectivity was mistaken for a successful media load")
 	}
 	if p.cmd != nil || p.client != nil || p.dir != "" {
 		t.Fatal("failed media retained resources")
+	}
+}
+
+func TestRealPlayerInvalidMediaAndCanceledLoad(t *testing.T) {
+	if os.Getenv("EASYTV_TEST_REAL_MPV") != "1" {
+		t.Skip("opt in with EASYTV_TEST_REAL_MPV=1")
+	}
+	path := filepath.Join(t.TempDir(), "broken.mp4")
+	if err := os.WriteFile(path, []byte("not media"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p := New(Config{OutputArgs: []string{"--ao=null", "--vo=null"}, StartupTimeout: time.Second})
+	defer p.Stop()
+	for i := 0; i < 3; i++ {
+		if err := p.Start(path, 0, uint64(i+1)); err == nil {
+			t.Fatal("invalid media accepted")
+		}
+		if p.cmd != nil || p.Client() != nil || p.dir != "" {
+			t.Fatal("failed load retained a player")
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := p.StartContext(ctx, path, 0, 4); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled load: %v", err)
 	}
 }
 

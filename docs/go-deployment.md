@@ -112,6 +112,10 @@ Successful starts save actual original media paths, including fallback candidate
 
 Unexpected IPC loss stops playback and cancels pending work without fabricating EOF or automatically reclaiming input. Distinguish it from ordinary advancement.
 
+Media errors are also distinct from normal EOF. They preserve the selected channel/file and latest observed resume position, retire the player, and schedule an exact-file retry ten seconds after each failed attempt. Recovery runs in a joined background worker; source-away/standby, user channel requests, explicit stop, successful live rescan, and shutdown cancel it. Verify no cross-channel/file fallback during recovery, no overlapping children, and the `CHANNEL: playback unavailable. Retrying...` overlay. A successful rescan cancels the old recovery; stopped playback still needs an intentional channel request to resume.
+
+Startup waits for mpv's `file-loaded` before persisting success and bounds mpv loading to five seconds. Validate missing/corrupt media and cancellation while loading, not just IPC readiness. OS-level uninterruptible I/O and network-mount stalls can still delay cancellation; mount timeouts remain an appliance configuration concern.
+
 Use foreground Ctrl-C or SIGTERM to the exact instance. Workers and owned children are joined and private workspaces removed. The player also owns a separate `/tmp` IPC/log directory. Broad `pkill mpv`/`pkill aosd_cat` is not an orderly-cleanup acceptance test. Application exit does not send TV standby.
 
 ## Unattended launch comes last

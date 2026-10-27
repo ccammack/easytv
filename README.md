@@ -232,6 +232,18 @@ For hardware-free headless use, omit `--cec-device` entirely. Hardware mpv argum
 
 Never share a writable state directory between simultaneous instances or between Go and legacy applications. Use fresh paths for acceptance and back up legacy state before migration. Invalid state/cache is reported rather than silently replaced with defaults.
 
+### Disconnected or unavailable media
+
+If mpv reports a media failure, EasyTV stops that player, saves the latest known position, and stays on the selected channel. With overlays enabled it shows, for example, `I Love Lucy: playback unavailable. Retrying...`; the message uses the normal five-second overlay duration and is refreshed between attempts. Without overlays it is logged as a channel-preview diagnostic.
+
+Recovery retries the **same saved file and position**, waiting ten seconds after each failed attempt. Attempts run in a background worker, never overlap, and do not claim Active Source or change channels. Recovery does not skip to another file simply because the saved file is missing. Once that file is available and mpv loads it, playback resumes. If ordinary end-of-file advancement cannot start any candidate, the last played file/position is retained for recovery.
+
+A channel request cancels the old recovery sequence; the newly selected channel gets its own normal startup attempt. CEC standby/source-away, explicit stop, successful live rescan, and application shutdown also cancel and join recovery. After a successful rescan while stopped, playback stays stopped: send a channel request to resume with the refreshed catalog. A failed rescan leaves the existing recovery sequence intact. There is no periodic catalog scan.
+
+Startup now requires mpv to report `file-loaded`, not merely expose an IPC socket, before EasyTV persists a successful start. Media loading has a five-second timeout; failed attempts are reaped before another begins. Fallback to a different file during normal startup begins at offset zero, not at another file's resume position.
+
+Filesystem disconnection behavior still depends on the OS/filesystem: a blocked kernel read, stuck network mount, or image copy may not be promptly interruptible. Configure mount/network timeouts appropriately. EasyTV cannot guarantee immediate cancellation of uninterruptible OS I/O, and does not infer a disconnection merely because playback position stops moving.
+
 ## HTTP controls
 
 HTTP is disabled unless `--listen` is supplied. There is no built-in authentication or TLS. Use loopback for initial acceptance; do not expose unauthenticated controls to an untrusted network.

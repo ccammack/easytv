@@ -104,7 +104,7 @@ func TestAdvanceStartFailureRemainsStoppedAndRetryable(t *testing.T) {
 	if err := c.Start(); err != nil {
 		t.Fatal(err)
 	}
-	if p.path != "/a/two.mp4" || p.offset != 0 {
-		t.Fatal("retry lost next item")
+	if p.path != "/a/one.mp4" || p.offset != 0 {
+		t.Fatal("retry lost last playback position")
 	}
 }

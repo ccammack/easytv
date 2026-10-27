@@ -9,6 +9,7 @@ import (
 	"github.com/ccammack/easytv/internal/mpvplayer"
 	"github.com/ccammack/easytv/internal/playback"
 	"github.com/ccammack/easytv/internal/state"
+	"path/filepath"
 	"sync/atomic"
 	"time"
 )
@@ -25,6 +26,7 @@ type Owner struct {
 	done       chan struct{}
 	started    atomic.Bool
 	scan       func(context.Context) ([]catalog.Channel, error)
+	retryDelay time.Duration
 }
 
 type OwnerCommand struct {
@@ -145,6 +147,45 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 		gate.reset(ctx, watched, current, next, o.player.PrepareMedia)
 		return nil
 	}
+	var retryTimer *time.Timer
+	var retryC <-chan time.Time
+	var retryDone <-chan error
+	var cancelRetry context.CancelFunc
+	var retryPath string
+	var retryOffset int64
+	var retryGeneration uint64
+	clearRetry := func() {
+		if retryTimer != nil {
+			retryTimer.Stop()
+		}
+		retryTimer = nil
+		retryC = nil
+		if retryDone != nil {
+			cancelRetry()
+			err := <-retryDone
+			if err != nil && !errors.Is(err, context.Canceled) {
+				o.report(err)
+			}
+			if err := o.player.Stop(); err != nil {
+				o.report(err)
+			}
+			retryDone = nil
+			cancelRetry = nil
+		}
+	}
+	waitForMedia := func() {
+		if o.controller.Running() || ctx.Err() != nil {
+			return
+		}
+		clearRetry()
+		delay := o.retryDelay
+		if delay <= 0 {
+			delay = 10 * time.Second
+		}
+		o.app.show(filepath.Base(o.controller.SelectedChannelID()) + ": playback unavailable. Retrying...")
+		retryTimer = time.NewTimer(delay)
+		retryC = retryTimer.C
+	}
 	advance := func(generation uint64, usePrepared bool) error {
 		if usePrepared && gate.result != nil {
 			if gate.result.err != nil {
@@ -158,6 +199,7 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 		if err := o.controller.Advance(generation); err != nil {
 			o.report(err)
 		}
+		waitForMedia()
 		return reconcile()
 	}
 	var previewTimer *time.Timer
@@ -171,6 +213,7 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 		previewC = nil
 	}
 	defer func() {
+		clearRetry()
 		clearTimer()
 		gate.clear()
 		retire()
@@ -179,6 +222,7 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 	if err := o.controller.Start(); err != nil {
 		o.report(err)
 	}
+	waitForMedia()
 	if err := reconcile(); err != nil {
 		return err
 	}
@@ -186,10 +230,40 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-retryC:
+			retryTimer = nil
+			retryC = nil
+			retryPath, retryOffset, retryGeneration = o.controller.RetryTarget()
+			attemptCtx, cancel := context.WithCancel(ctx)
+			cancelRetry = cancel
+			done := make(chan error, 1)
+			retryDone = done
+			path, offset, generation := retryPath, retryOffset, retryGeneration
+			go func() { done <- o.player.StartContext(attemptCtx, path, offset, generation) }()
+		case err := <-retryDone:
+			retryDone = nil
+			cancelRetry()
+			cancelRetry = nil
+			if err != nil {
+				o.report(fmt.Errorf("retry %q: %w", retryPath, err))
+			} else {
+				if err := o.controller.AcceptRetry(retryPath, retryOffset, retryGeneration); err != nil {
+					o.report(err)
+				}
+			}
+			if o.controller.Running() {
+				o.app.show("")
+			} else {
+				waitForMedia()
+			}
+			if err := reconcile(); err != nil {
+				return err
+			}
 		case scanned := <-scanDone:
 			scanDone = nil
 			err := scanned.err
 			if err == nil && ctx.Err() == nil {
+				clearRetry()
 				gate.clear()
 				clearTimer()
 				retire()
@@ -239,6 +313,7 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 			if err := o.app.CommitPreview(previewSequence, time.Now()); err != nil {
 				o.report(err)
 			}
+			waitForMedia()
 			if err := reconcile(); err != nil {
 				return err
 			}
@@ -250,6 +325,22 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 			case "position":
 				o.controller.RecordPosition(event.Generation, int64(event.Seconds))
 			case "end-file", "process-exit":
+				if event.Kind == "process-exit" || event.Reason != "eof" {
+					gate.clear()
+					clearTimer()
+					retire()
+					o.app.preview.Cancel()
+					o.app.show("")
+					failure := fmt.Errorf("mpv %s: %s", event.Kind, event.Reason)
+					if err := o.controller.Fail(event.Generation, errors.Join(failure, event.Err)); err != nil {
+						o.report(err)
+					}
+					waitForMedia()
+					if err := reconcile(); err != nil {
+						return err
+					}
+					continue
+				}
 				if event.Kind == "end-file" && gate.image {
 					continue
 				}
@@ -295,10 +386,10 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 					continue
 				}
 			case "volume", "mute":
-				client := o.player.Client()
-				if !o.controller.Running() || client == nil {
+				if !o.controller.Running() {
 					err = errors.New("player not running")
 				} else {
+					client := o.player.Client()
 					commandCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 					if command.Kind == "volume" {
 						err = client.SetVolume(commandCtx, command.Volume)
@@ -308,8 +399,11 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 					cancel()
 				}
 			case "start":
+				clearRetry()
 				err = o.controller.Start()
+				waitForMedia()
 			case "stop":
+				clearRetry()
 				gate.clear()
 				clearTimer()
 				retire()
@@ -318,6 +412,7 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 				var ticket playback.PreviewTicket
 				ticket, err = o.app.RequestChannel(command.Direction, time.Now())
 				if err == nil {
+					clearRetry()
 					clearTimer()
 					previewSequence = ticket.Sequence
 					previewTimer = time.NewTimer(time.Until(ticket.Due))
@@ -325,6 +420,9 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 				}
 			case "cec":
 				reason, err = o.app.HandleCEC(command.Message, command.Adapter)
+				if reason != "" {
+					clearRetry()
+				}
 				if !o.controller.Running() {
 					gate.clear()
 					clearTimer()

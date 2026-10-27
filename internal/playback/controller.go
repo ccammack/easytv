@@ -103,7 +103,7 @@ func (c *Controller) Start() error {
 	for attempt := 0; attempt < len(ch.Media); attempt++ {
 		path := ch.Media[(index+attempt)%len(ch.Media)]
 		startOffset := offset
-		if preparedmedia.IsImage(path) {
+		if attempt > 0 || preparedmedia.IsImage(path) {
 			startOffset = 0
 		}
 		c.generation++
