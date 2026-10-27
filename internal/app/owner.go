@@ -14,7 +14,7 @@ import (
 
 // Owner serializes application commands, preview commits and player events.
 // After Run begins, its controller, coordinator and player belong only to it.
-// This checkpoint handles audio/video only; image policy is not installed.
+// Image timers and preparation results are handled in the same owner loop.
 type Owner struct {
 	controller *playback.Controller
 	app        *Coordinator
@@ -28,7 +28,7 @@ type Owner struct {
 type OwnerCommand struct {
 	Volume    float64
 	Muted     bool
-	Kind      string // status, start, stop, channel, or cec
+	Kind      string // status, start, stop, channel, volume, mute, or cec
 	Direction int
 	Message   cec.ReceivedMessage
 	Adapter   cec.AdapterInfo
@@ -211,7 +211,19 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 				if err := advance(event.Generation, event.Kind == "process-exit"); err != nil {
 					return err
 				}
-			case "ipc-error", "request-error":
+			case "ipc-error":
+				if event.Err != nil {
+					o.report(event.Err)
+				}
+				// A broken transport is not an EOF and must not silently
+				// leave an uncontrollable child or a pending restart behind.
+				gate.clear()
+				clearTimer()
+				retire()
+				if err := o.app.Stop(); err != nil {
+					o.report(err)
+				}
+			case "request-error":
 				if event.Err != nil {
 					o.report(event.Err)
 				}
