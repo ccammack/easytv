@@ -64,6 +64,9 @@ func TestAddressConfigurationLifecycle(t *testing.T) {
 						return nil
 					}
 					calls = append(calls, "claim")
+					if name := cString(addresses.OsdName[:]); name != "easytv" {
+						t.Fatalf("CEC OSD name=%q; want easytv", name)
+					}
 					if configured {
 						return syscall.EBUSY
 					}

@@ -12,24 +12,121 @@ Functional checkpoint `70ef2d5` adds opt-in owned OSD previews after the IPC-tea
 
 Actual display/audio, real `aosd_cat` rendering/timing, physical CEC behavior, and unattended boot remain separate acceptance work. See [Go deployment and acceptance](docs/go-deployment.md) before changing a live installation.
 
-## Requirements and build
+## Clone and build
 
-- Linux and a Go toolchain compatible with the `go 1.26.5` directive in `go.mod`.
-- `mpv` on PATH for playback.
-- Image tools: `vipsheader` and `vipsthumbnail` on PATH. The preparer reads image dimensions with the former and downsizes oversized images with the latter. The reference Debian installation uses `libvips-tools`. Audio/video-only playback does not invoke image conversion tools.
-- For `--osd`, `aosd_cat` on PATH and an existing authorized X session. EasyTV does not start X or grant display access.
-- For physical CEC, an explicitly selected accessible Linux CEC device without a competing controller.
+The appliance installation targets Raspberry Pi OS Lite with systemd, KMS graphics, and a working HDMI display/CEC adapter. No desktop environment is needed. The commands below use Raspberry Pi OS Lite Trixie; older releases may need a newer Go bootstrap toolchain from [go.dev](https://go.dev/doc/install).
 
-Build from the repository root:
+Install the build prerequisites: Git, Make, CA certificates, and Go. A Go toolchain compatible with the `go 1.26.5` directive in `go.mod` is required. Trixie's Go package can download that version using Go's toolchain mechanism (requires Go 1.21 or newer):
 
 ```bash
-mkdir -p "$HOME/.local/bin"
-GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off GOWORK=off \
-  go build -mod=readonly -o "$HOME/.local/bin/easytv" ./cmd/easytv
-"$HOME/.local/bin/easytv" --help
+sudo apt-get update
+sudo apt-get install -y git make ca-certificates golang-go
+
+# Download/select the required Go toolchain as your normal user.
+export PATH="$(GOTOOLCHAIN=go1.26.5 go env GOROOT)/bin:$PATH"
+go version
 ```
 
-Help does not start the runtime. Building does not install a service, alter login profiles, select an audio route, or configure media mounts.
+Replace `<repository-url>` with the URL of your EasyTV repository. Build as your normal user, not root:
+
+```bash
+git clone <repository-url> easytv
+cd easytv
+make
+./bin/easytv --help
+make test
+```
+
+`make` outputs `./bin/easytv`. `make clean` removes that binary. Builds/tests use the selected local toolchain with module-network access disabled; the application has no external Go module dependencies. The PATH export above lasts for the current shell; repeat it in a new shell if needed.
+
+Help and building do not start playback or install anything. Ordinary Go tests do not access real CEC/display hardware; real-mpv integration tests are opt-in. Installer tests use an isolated filesystem when `bwrap` is already available, otherwise report that those scenarios were skipped.
+
+## Install on Raspberry Pi OS Lite
+
+From the built checkout:
+
+```bash
+sudo make install
+```
+
+The installer installs these runtime prerequisites using apt:
+
+- `mpv` for playback.
+- `libvips-tools` for `vipsheader` and `vipsthumbnail` image preparation.
+- `aosd-cat` and fonts for channel previews.
+- Minimal Xorg, `xinit`/`startx`, `xauth`, and `libpam-systemd` for the console X session.
+
+CEC is part of EasyTV's Go implementation: no separately cloned CEC project, `cec-client`, or libCEC daemon is needed.
+
+The installer creates the non-login `easytv` user/group, adds `video`, `render`, and `audio` hardware access, installs a root-owned `/usr/local/bin/easytv`, and installs/enables `easytv.service`. State/home is private to the service at `/var/lib/easytv`; systemd creates `/run/easytv` for temporary workspace and X authorization. No audio server, mixer hooks, or system-volume configuration is installed by EasyTV.
+
+**Installation enables next-boot startup but deliberately does not start/restart playback or take over your current console.** It does not configure media mounts, change media ownership, or modify your login profiles. Reinstalling updates the binary and base unit; local systemd drop-ins and saved state are preserved.
+
+### Review paths and start
+
+The supplied service uses `/dev/cec0`, `/mnt/media`, X display `:0` on `tty1`, channel overlays, a catalog rescan on every start, and HTTP controls bound to `127.0.0.1:8080`. Verify the correct CEC device and prepare the media before starting or rebooting:
+
+```bash
+ls -l /dev/cec*
+ls -la /mnt/media
+sudo -u easytv test -r /dev/cec0
+sudo -u easytv test -w /dev/cec0
+sudo -u easytv ls /mnt/media
+```
+
+Each media-root child directory is a channel (see below); files must be readable and directories traversable by `easytv`. Mount external storage persistently, for example through `/etc/fstab`, before starting. Use appropriate read-only permissions, filesystem mount options, or an existing media group; do not recursively hand ownership of your library to the service or make devices world-writable. The default CEC node normally belongs to `video`; if yours differs, grant narrowly scoped access through the appliance's device/group configuration. Do not run another CEC controller alongside EasyTV.
+
+All application arguments live in the systemd command line, not a separate config file. For different paths/options:
+
+```bash
+sudo systemctl edit easytv.service
+```
+
+For example, replace the command and mount dependency as follows (keep all options before the media roots):
+
+```ini
+[Unit]
+RequiresMountsFor=
+RequiresMountsFor=/srv/media
+
+[Service]
+ExecStart=
+ExecStart=/usr/bin/startx /usr/local/bin/easytv --cec-device=/dev/cec1 --state-dir=/var/lib/easytv --temp-dir=/run/easytv --listen=127.0.0.1:8080 --osd --scan /srv/media -- /usr/bin/Xorg :0 vt1 -keeptty -nolisten tcp -s 0 -dpms
+```
+
+Supply every media root both in the command and in `RequiresMountsFor`. Omit `--listen` to disable HTTP, or `--osd` to disable previews. Remove `--scan` to reuse the cached catalog rather than refresh on every start.
+
+Start from SSH or another console: the service reserves `tty1` and stops its login prompt while running. Do not use it alongside a desktop/display manager or another X session on that display.
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart easytv.service
+systemctl status easytv.service --no-pager
+journalctl -u easytv.service -b --no-pager -n 100
+```
+
+Once physical display/CEC acceptance is complete, reboot to check unattended startup:
+
+```bash
+sudo reboot
+```
+
+The service uses `startx` to authorize and start X without `.xinitrc` or `.bash_profile`; there is no shell autologin requirement. It waits for the configured media mounts, disables X screen blanking/DPMS, logs to the journal, and restarts the session after exit. EasyTV attempts playback automatically, but does **not** wake the television or select its HDMI input at startup. A running service is not proof of visible output; validate on the target Pi.
+
+### Audio responsibility
+
+EasyTV lets mpv select its audio backend/device. Volume and mute requests only send mpv IPC commands; EasyTV does not change OS or TV volume, select an audio route, or repair sound configuration. Installing mpv alone does not guarantee audible playback: the OS's audio setup and the `easytv` user's device/session access must already work. Diagnose silent playback or ineffective volume controls with mpv and Raspberry Pi OS, outside EasyTV.
+
+mpv is launched with `--no-config`, so ordinary mpv configuration files are not loaded. Volume/mute changes apply to the current player and are not retained across player replacement.
+
+### Stop and uninstall
+
+```bash
+sudo systemctl stop easytv.service
+sudo make uninstall
+```
+
+The scripts can also be run with `sudo bash scripts/install.sh` or `sudo bash scripts/uninstall.sh`. Uninstall stops/disables the service and removes the installed binary/base unit. It preserves media, `/var/lib/easytv`, the account/groups, runtime prerequisite packages, and local systemd overrides. Reboot to restore the normal `tty1` login. Neither installation nor uninstallation requires running the Go compiler as root.
 
 ## Media and catalog
 
@@ -68,7 +165,7 @@ with wave.open(sys.argv[1], 'wb') as stream:
     stream.setframerate(8000)
     stream.writeframes(bytes(8000 * 2 * 3))
 PY_MEDIA
-"$HOME/.local/bin/easytv" --headless \
+./bin/easytv --headless \
   --state-dir "$work/state" --temp-dir "$work/tmp" \
   --scan --run-for 5s "$work/media"
 EASYTV_HEADLESS
@@ -90,7 +187,7 @@ One or more media roots are required. Both storage flags are required; the progr
 | `--temp-dir` | empty, required | Parent of the runtime's private preparation workspace. |
 | `--run-for` | zero/unbounded | Optional bounded duration, such as `30s`; negative values rejected. |
 
-For hardware-free headless use, omit `--cec-device` entirely. Hardware mpv arguments currently select fullscreen output and ALSA audio; there is no CLI audio-device selector. `--temp-dir` does not relocate every temporary file: the player also owns an IPC/log directory under `/tmp`.
+For hardware-free headless use, omit `--cec-device` entirely. Hardware mpv arguments select fullscreen output and leave audio-backend/device selection to mpv; there is no CLI audio-device selector. `--temp-dir` does not relocate every temporary file: the player also owns an IPC/log directory under `/tmp`.
 
 ## Playback and persistence
 
@@ -163,4 +260,4 @@ GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off GOWORK=off \
 
 Ordinary tests include private fake-overlay helpers; opt-in real-mpv integration suites require explicit enabling and isolated media/state. They are not live-appliance acceptance commands.
 
-The Go entrypoint does not provide legacy evdev/FLIRC bindings, legacy shell hooks, a REST playback status/start/stop API, or autostart installation. Complete target-device acceptance before replacing a live launcher.
+The Go entrypoint does not provide legacy evdev/FLIRC bindings, legacy shell hooks, or a REST playback status/start/stop API. Boot startup is provided separately by the installer/systemd unit. Complete target-device acceptance before replacing a live launcher.

@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "command": true,
+        "go": true,
+        "make": true,
+        "systemd-analyze": true
+    }
+}

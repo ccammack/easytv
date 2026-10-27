@@ -153,8 +153,7 @@ func (b *LinuxCECBackend) ioctlGLogAddrs() error {
 }
 
 // claimLogicalAddress asks the kernel to claim a logical address for us
-// as a playback device (the role cecmond is designed for: a media player
-// sitting on the bus). The kernel handles the actual CEC polling/
+// as a playback device. The kernel handles the actual CEC polling/
 // arbitration and reports back which address it won.
 func (b *LinuxCECBackend) claimLogicalAddress() error {
 	var la cecLogAddrs
@@ -163,7 +162,7 @@ func (b *LinuxCECBackend) claimLogicalAddress() error {
 	la.VendorID = 0xffffffff // CEC_VENDOR_ID_NONE
 	la.Flags = cecLogAddrsFlAllowRcPassthru
 
-	name := "cecmond"
+	name := "easytv"
 	copy(la.OsdName[:], name)
 
 	la.PrimaryDeviceType[0] = cecOpPrimDevtypePlayback

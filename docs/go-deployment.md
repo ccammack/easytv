@@ -18,9 +18,9 @@ The version-1 state layout is retained, but absolute channel/media identities an
 
 Build using the README. Confirm `mpv`; image preparation invokes `vipsheader` and `vipsthumbnail`, not the `vips` executable. Optional overlays require `aosd_cat` on PATH and the intended existing authorized X session.
 
-An SSH shell may not have the console session's DISPLAY/XAUTHORITY environment. Use the actual authorized session; do not grant broad display access to bypass an error. EasyTV does not start X.
+An SSH shell may not have the console session's DISPLAY/XAUTHORITY environment. Use the actual authorized session; do not grant broad display access to bypass an error. The executable itself does not start X; the supplied appliance service starts an authorized session using `startx`.
 
-Hardware mpv arguments use ALSA. The historical PulseAudio walkthrough does not establish that this Go executable's selected route works. There is no CLI audio-device override; verify the intended route separately.
+Audio-backend/device selection belongs to mpv and the OS. EasyTV only sends volume/mute commands to mpv over IPC; it does not configure or repair system audio. There is no CLI audio-device override, and mpv is launched with `--no-config`. Verify working sound separately under the intended service user/session.
 
 Select the actual CEC device and permissions from the appliance configuration. Metadata-only inspection can list nodes:
 
@@ -28,7 +28,7 @@ Select the actual CEC device and permissions from the appliance configuration. M
 ls -l /dev/cec*
 ```
 
-Presence alone does not establish the intended HDMI port or usable configuration. No adapter path is guessed here. Opening the Go backend acquires exclusive ownership and may clear/reconfigure logical addresses: it is not passive inspection. Do not run `cec-client`, a second EasyTV instance, or another adapter controller alongside it.
+Presence alone does not establish the intended HDMI port or usable configuration. The supplied service defaults to `/dev/cec0`; verify or override it rather than assuming it is correct. Opening the Go backend acquires exclusive ownership and may clear/reconfigure logical addresses: it is not passive inspection. Do not run `cec-client`, a second EasyTV instance, or another adapter controller alongside it.
 
 ## Stage 1: isolated headless acceptance
 
@@ -59,7 +59,7 @@ set -euo pipefail
 : "${DISPLAY:?Run in the intended authorized X session}"
 [[ -c "$CEC_DEVICE" ]] || { printf 'Not a character device\n' >&2; exit 1; }
 [[ -d "$MEDIA_ROOT" ]] || { printf 'Media root missing\n' >&2; exit 1; }
-"$HOME/.local/bin/easytv" \
+./bin/easytv \
   --cec-device "$CEC_DEVICE" \
   --state-dir "$STATE_DIR" --temp-dir "$TEMP_DIR" \
   --listen 127.0.0.1:8080 --scan --run-for 30s \
@@ -112,11 +112,11 @@ Use foreground Ctrl-C or SIGTERM to the exact instance. Workers and owned childr
 
 ## Unattended launch comes last
 
-Do not change `.xinitrc`, login profiles, or service definitions until hardware acceptance is complete. Go does not install/update those files.
+Follow the [README installation instructions](../README.md#install-on-raspberry-pi-os-lite) for `make`, `sudo make install`, path review, service startup, and uninstall. Installation enables boot startup but does not start or restart playback; review paths/media access before starting or rebooting. The obsolete repository-root `.xinitrc` and `.bash_profile` are removed; the service supplies the client/server command directly to `startx` and uses a PAM/logind console session instead of shell autologin.
 
-After acceptance, adapt the existing authorized X-session launcher to the built Go binary, reviewed absolute media roots, explicit adapter, dedicated persistent state/workspace paths, optional `--osd`, and optional loopback HTTP. Remove the short runtime bound only when deliberately moving to unattended operation. Store/export required environment in the launcher rather than relying on a transient SSH shell; ensure media mounts are available first.
+The unit runs as `easytv`, reserves `tty1`, starts authorized X, and supplies explicit state/workspace paths, `/dev/cec0`, `/mnt/media`, `--osd`, `--scan`, and loopback HTTP. Override its `ExecStart` and `RequiresMountsFor` together when changing media paths. No application config file or separately installed CEC project is needed.
 
-Retain a rollback launcher/state backup and review logging/restart behavior separately. EasyTV prints readiness/listener information to stdout and diagnostics to stderr; it does not configure journald or a restart policy.
+Retain a rollback launcher/state backup and review logging/restart behavior separately. EasyTV prints readiness/listener information to stdout and diagnostics to stderr; the service captures these in journald and restarts the X/application session after exit. The service cannot detect every stopped-playback condition inside a still-running application, and it does not wake/select the TV at boot.
 
 Legacy evdev/FLIRC hotkeys and shell-script hooks are not provided by this entrypoint. Remote integration must explicitly use the implemented API or be developed separately. Do not claim the legacy keyboard table applies to Go.
 

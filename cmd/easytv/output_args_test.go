@@ -12,7 +12,7 @@ func TestExplicitOutputModes(t *testing.T) {
 	if got := playerOutputArgs(true); !reflect.DeepEqual(got, []string{"--ao=null", "--vo=null"}) {
 		t.Fatal(got)
 	}
-	want := []string{"--force-window=yes", "--fullscreen", "--ao=alsa", "--title=easytv", "--osd-level=0", "--cache=no", "--profile=fast", "--hwdec=auto"}
+	want := []string{"--force-window=yes", "--fullscreen", "--title=easytv", "--osd-level=0", "--cache=no", "--profile=fast", "--hwdec=auto"}
 	if got := playerOutputArgs(false); !reflect.DeepEqual(got, want) {
 		t.Fatal(got)
 	}

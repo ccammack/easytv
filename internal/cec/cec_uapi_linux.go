@@ -3,7 +3,7 @@
 package cec
 
 // This file mirrors the parts of the Linux kernel CEC UAPI header
-// (include/uapi/linux/cec.h) that cecmond needs. Field order, widths,
+// (include/uapi/linux/cec.h) that EasyTV needs. Field order, widths,
 // and array sizes are copied from that header so the Go struct layout
 // matches what the kernel expects on /dev/cecX ioctl calls.
 //

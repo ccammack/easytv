@@ -1,0 +1,46 @@
+[Unit]
+Description=EasyTV fullscreen appliance
+Requires=systemd-logind.service
+After=systemd-logind.service systemd-user-sessions.service getty@tty1.service
+Conflicts=getty@tty1.service
+RequiresMountsFor=/mnt/media
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=easytv
+Group=easytv
+SupplementaryGroups=video render audio
+PAMName=login
+Environment=HOME=/var/lib/easytv
+Environment=XDG_SESSION_TYPE=x11 XDG_SESSION_CLASS=user XDG_SEAT=seat0 XDG_VTNR=1
+Environment=XAUTHORITY=/run/easytv/Xauthority TMPDIR=/run/easytv
+StateDirectory=easytv
+StateDirectoryMode=0700
+RuntimeDirectory=easytv
+RuntimeDirectoryMode=0700
+WorkingDirectory=/var/lib/easytv
+UMask=0077
+TTYPath=/dev/tty1
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+UtmpIdentifier=tty1
+UtmpMode=user
+ExecStart=/usr/bin/startx /usr/local/bin/easytv \
+    --cec-device=/dev/cec0 \
+    --state-dir=/var/lib/easytv \
+    --temp-dir=/run/easytv \
+    --listen=127.0.0.1:8080 \
+    --osd --scan /mnt/media \
+    -- /usr/bin/Xorg :0 vt1 -keeptty -nolisten tcp -s 0 -dpms
+Restart=always
+RestartSec=5s
+TimeoutStopSec=20s
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target
