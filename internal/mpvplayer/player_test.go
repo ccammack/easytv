@@ -87,7 +87,7 @@ func TestRealPlayerLifecycle(t *testing.T) {
 		if err := p.Stop(); err != nil {
 			t.Fatal(err)
 		}
-		if p.Running() || p.Client() != nil || child.ProcessState == nil || !child.ProcessState.Exited() {
+		if p.Running() || p.Client() != nil || child.ProcessState == nil {
 			t.Fatal("child not reaped")
 		}
 		if _, err := os.Stat(dir); !os.IsNotExist(err) {
@@ -105,10 +105,39 @@ func TestRealPlayerBadMediaCleansResources(t *testing.T) {
 	}
 	p := New(Config{OutputArgs: []string{"--ao=null", "--vo=null"}, StartupTimeout: 2 * time.Second})
 	defer p.Stop()
-	if err := p.Start(filepath.Join(t.TempDir(), "missing.wav"), 0, 1); err == nil {
-		t.Fatal("missing media loaded")
+	err := p.Start(filepath.Join(t.TempDir(), "missing.wav"), 0, 1)
+	if err == nil {
+		select {
+		case <-p.done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("missing media did not terminate mpv")
+		}
+		if err := p.Stop(); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if p.cmd != nil || p.client != nil || p.dir != "" {
-		t.Fatal("failed media start retained resources")
+		t.Fatal("failed media retained resources")
 	}
+}
+
+func TestRealPlayerShortMediaStartup(t *testing.T) {
+	if os.Getenv("EASYTV_TEST_REAL_MPV") != "1" {
+		t.Skip("opt in with EASYTV_TEST_REAL_MPV=1")
+	}
+	p := New(Config{OutputArgs: []string{"--ao=null", "--vo=null"}})
+	defer p.Stop()
+	path := silentWAV(t)
+	for generation := uint64(1); generation <= 5; generation++ {
+		if err := p.Start(path, 0, generation); err != nil {
+			t.Fatalf("startup %d: %v", generation, err)
+		}
+		if p.Client() == nil || p.Generation() != generation {
+			t.Fatal("startup did not provide IPC client")
+		}
+		if err := p.Stop(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Log("five short-file startups completed without file-looping")
 }

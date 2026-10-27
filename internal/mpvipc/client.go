@@ -114,10 +114,11 @@ func (c *Client) Call(ctx context.Context, command ...any) (json.RawMessage, err
 	}
 }
 
+// NextEvent preserves events already received before the socket closed.
 func (c *Client) NextEvent(ctx context.Context) (json.RawMessage, error) {
 	select {
-	case <-c.done:
-		return nil, c.failure()
+	case event := <-c.events:
+		return event, nil
 	default:
 	}
 	select {
@@ -126,9 +127,15 @@ func (c *Client) NextEvent(ctx context.Context) (json.RawMessage, error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-c.done:
-		return nil, c.failure()
+		select {
+		case event := <-c.events:
+			return event, nil
+		default:
+			return nil, c.failure()
+		}
 	}
 }
+
 func (c *Client) readLoop() {
 	scanner := bufio.NewScanner(c.conn)
 	scanner.Buffer(make([]byte, 4096), 1024*1024)

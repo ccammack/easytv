@@ -2,7 +2,6 @@ package mpvplayer
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/ccammack/easytv/internal/mpvipc"
@@ -144,51 +143,22 @@ func (p *Player) Start(file string, offset int64, generation uint64) (result err
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
+	// Reference startup readiness is IPC connectivity, not file-loaded.
 	p.client = mpvipc.New(conn)
-	for {
-		raw, err := p.client.NextEvent(ctx)
-		if err != nil {
-			return fmt.Errorf("wait for media load: %w", err)
-		}
-		var event struct {
-			Event  string `json:"event"`
-			Reason string `json:"reason"`
-		}
-		if err := json.Unmarshal(raw, &event); err != nil {
-			return err
-		}
-		if event.Event == "file-loaded" {
-			break
-		}
-		if event.Event == "end-file" {
-			return fmt.Errorf("media failed before load: %s", event.Reason)
-		}
-	}
 	p.generation = generation
 	success = true
 	return nil
 }
 
-// Stop requests quit and kills only its own child if the grace period expires.
+// Stop matches the reference: kill our child, reap it, then clean resources.
 func (p *Player) Stop() error {
 	if p.cmd == nil {
 		return nil
 	}
-	if p.Running() && p.client != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), p.config.StopTimeout)
-		_, _ = p.client.Call(ctx, "quit")
-		cancel()
+	if err := p.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return fmt.Errorf("kill mpv: %w", err)
 	}
-	timer := time.NewTimer(p.config.StopTimeout)
-	defer timer.Stop()
-	select {
-	case <-p.done:
-	case <-timer.C:
-		if err := p.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
-			return fmt.Errorf("kill mpv: %w", err)
-		}
-		<-p.done
-	}
+	<-p.done
 	p.cleanup()
 	return nil
 }
