@@ -1,6 +1,8 @@
 package catalog
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -8,6 +10,8 @@ import (
 	"sort"
 	"strings"
 )
+
+var ErrRescanInProgress = errors.New("rescan already in progress")
 
 // Channel is a nonempty immediate child directory of a media root.
 // Path is the stable channel identity used by the existing application.
@@ -32,6 +36,13 @@ func extensionSet(text string) map[string]bool {
 // Hidden entries and symbolic links are skipped. Read errors are returned,
 // never silently converted into a successful partial catalog.
 func ScanRoot(root string) ([]Channel, error) {
+	return scanRoot(context.Background(), root)
+}
+
+func scanRoot(ctx context.Context, root string) ([]Channel, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	absolute, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("resolve root: %w", err)
@@ -42,11 +53,17 @@ func ScanRoot(root string) ([]Channel, error) {
 	}
 	channels := make([]Channel, 0)
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if strings.HasPrefix(entry.Name(), ".") || !entry.IsDir() {
 			continue
 		}
 		channel := Channel{Root: absolute, Name: entry.Name(), Path: filepath.Join(absolute, entry.Name()), Media: make([]string, 0)}
 		err := filepath.WalkDir(channel.Path, func(path string, entry fs.DirEntry, walkErr error) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if walkErr != nil {
 				return walkErr
 			}
@@ -81,4 +98,29 @@ func ScanRoot(root string) ([]Channel, error) {
 	}
 	sort.Slice(channels, func(i, j int) bool { return channels[i].Path < channels[j].Path })
 	return channels, nil
+}
+
+// Scan builds a complete replacement without saving it. Unlike startup's
+// best-effort scan, a live refresh must not replace a working catalog on error.
+func Scan(ctx context.Context, roots []string) (Catalog, error) {
+	normalized, err := normalizeRoots(roots)
+	if err != nil {
+		return Catalog{}, err
+	}
+	if len(normalized) == 0 {
+		return Catalog{}, errors.New("media roots required")
+	}
+	result := DefaultCatalog()
+	for _, root := range normalized {
+		channels, err := scanRoot(ctx, root)
+		if err != nil {
+			return Catalog{}, err
+		}
+		entry := CatalogRoot{Channels: make(map[string]CatalogChannel)}
+		for _, ch := range channels {
+			entry.Channels[ch.Path] = CatalogChannel{Name: ch.Name, Path: ch.Path, Media: ch.Media}
+		}
+		result.Roots[root] = entry
+	}
+	return result, ctx.Err()
 }

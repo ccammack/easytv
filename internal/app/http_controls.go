@@ -20,3 +20,6 @@ func (c ownerHTTPControls) SetVolume(ctx context.Context, value float64) error {
 func (c ownerHTTPControls) SetMute(ctx context.Context, value bool) error {
 	return c.submit(ctx, OwnerCommand{Kind: "mute", Muted: value})
 }
+func (c ownerHTTPControls) Rescan(ctx context.Context) error {
+	return c.submit(ctx, OwnerCommand{Kind: "rescan"})
+}

@@ -7,12 +7,31 @@ import (
 	"io"
 	"math"
 	"net/http"
+
+	"github.com/ccammack/easytv/internal/catalog"
 )
 
 type PlaybackControls interface {
 	ChangeChannel(context.Context, int) error
 	SetVolume(context.Context, float64) error
 	SetMute(context.Context, bool) error
+	Rescan(context.Context) error
+}
+
+func (s *Server) rescanHandler(w http.ResponseWriter, r *http.Request) {
+	if s.controls == nil {
+		http.Error(w, "playback unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if err := s.controls.Rescan(r.Context()); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, catalog.ErrRescanInProgress) {
+			status = http.StatusConflict
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // Configure only before serving requests.

@@ -85,3 +85,5 @@ func (p *Preview) Pending() (PreviewTicket, bool) {
 	}
 	return *p.pending, true
 }
+
+func (p *Preview) Delay() time.Duration { return p.delay }

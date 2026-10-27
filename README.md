@@ -146,6 +146,37 @@ Pass the root, not each channel, as the positional argument. Multiple roots are 
 
 `--scan` rebuilds the catalog using the supplied roots: include every root you want retained. Without it, existing cached roots are reused and missing roots are scanned. Cached roots are not automatically refreshed when files appear.
 
+### Rescan after changing media
+
+After adding, removing, or moving media, SSH into the Pi and request a live rescan:
+
+```bash
+curl --fail-with-body -i -X POST http://127.0.0.1:8080/rescan
+journalctl -u easytv.service -b --no-pager -n 100
+```
+
+HTTP must be enabled (`--listen=127.0.0.1:8080` in the supplied service). No request body or media-root arguments are needed: the scan uses all roots configured on the running instance.
+
+The filesystem scan runs in the background while playback and controls continue. After a successful scan, the playback owner cancels pending channel previews/preparation, stops its current player, installs the refreshed catalog, and resumes from the latest known position **only if playback was running when the result was applied**. Playback stopped by CEC, including a source switch or standby, stays stopped. Rescanning does not claim Active Source or wake the TV, and it does not restart X or CEC.
+
+If the selected channel was removed, EasyTV selects the next surviving channel from the previous catalog order, wrapping around; if none survive, it selects the first new channel. If the saved file was removed, playback starts with the channel's first remaining item. Failed preparation/start candidates are skipped; if a whole channel cannot start, the rescan tries the next channel once around the catalog. These playback failures are still reported, even if a fallback starts successfully.
+
+The request waits for the scan and application of the result. HTTP 204 means success; 409 means another rescan is already in progress. Scan errors, an entirely empty library, and catalog-save failures return 500 without replacing the live catalog or stopping playback. Playback/state-save failures also return 500 and are logged; the new catalog may already be installed, so inspect the logs rather than assuming failure means nothing changed. An accepted rescan continues if its HTTP client disconnects; application shutdown cancels and joins the worker.
+
+Alternatively, restart the service to rescan:
+
+```bash
+sudo systemctl restart easytv.service
+systemctl status easytv.service --no-pager
+journalctl -u easytv.service -b --no-pager -n 100
+```
+
+The supplied service includes `--scan`, so every service start (including boot and restart) rebuilds the catalog from its configured media roots. If you removed that flag in a local service customization, restore it before using restart to rescan. There is no periodic background scan.
+
+Restart briefly interrupts playback and restarts the X session. EasyTV saves its known playback position during orderly shutdown, then attempts to restore playback using the rebuilt catalog. If the saved channel no longer exists, it selects the first remaining channel. If the saved file no longer exists in that channel, it starts from the first catalog item; failed preparation/start candidates are skipped. With no playable channels, startup fails and reports an error.
+
+Do not run a second EasyTV instance against the service's state directory to force a scan. The running application keeps its catalog in memory; changing the catalog file externally does not refresh it. Use `/rescan` or a service restart. Finish copying media before requesting a scan; scanning is not a filesystem snapshot and cannot prevent files from changing afterward.
+
 ## Isolated headless smoke run
 
 After building, this example creates a tiny WAV and private state/workspace, runs for five seconds, and removes only its scratch directory. It starts real mpv, but no CEC, HTTP listener, real audio/video output, or overlay.
@@ -210,6 +241,7 @@ HTTP is disabled unless `--listen` is supplied. There is no built-in authenticat
 | `POST` | `/channel` | JSON `{"direction":"next"}` or `{"direction":"previous"}`. |
 | `POST` | `/volume` | JSON `{"volume":50}`; finite numeric range 0 through 100. |
 | `POST` | `/mute` | JSON `{"muted":true}` or `{"muted":false}`. |
+| `POST` | `/rescan` | No body; refresh configured media roots and apply the result before returning 204. Concurrent rescan: 409; failures: 500. |
 | `POST` | `/power` | JSON `{"state":"on"}` or `{"state":"off"}`; requires CEC. |
 | `POST` | `/active-source` | No body required; explicit CEC Active Source assertion. |
 | `GET` | `/adapter` | Current adapter metadata/logical and physical addresses; requires CEC. |

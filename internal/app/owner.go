@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/ccammack/easytv/internal/catalog"
 	"github.com/ccammack/easytv/internal/cec"
 	"github.com/ccammack/easytv/internal/mpvplayer"
 	"github.com/ccammack/easytv/internal/playback"
@@ -23,12 +24,13 @@ type Owner struct {
 	requests   chan ownerRequest
 	done       chan struct{}
 	started    atomic.Bool
+	scan       func(context.Context) ([]catalog.Channel, error)
 }
 
 type OwnerCommand struct {
 	Volume    float64
 	Muted     bool
-	Kind      string // status, start, stop, channel, volume, mute, or cec
+	Kind      string // status, start, stop, channel, volume, mute, cec, or rescan
 	Direction int
 	Message   cec.ReceivedMessage
 	Adapter   cec.AdapterInfo
@@ -45,6 +47,11 @@ type OwnerResult struct {
 type ownerRequest struct {
 	command OwnerCommand
 	reply   chan OwnerResult
+}
+
+type scanResult struct {
+	channels []catalog.Channel
+	err      error
 }
 
 func NewOwner(c *playback.Controller, a *Coordinator, p *mpvplayer.Player, report func(error)) (*Owner, error) {
@@ -89,6 +96,15 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 		return errors.New("owner can run only once")
 	}
 	defer close(o.done)
+	var scanDone <-chan scanResult
+	var scanReply chan OwnerResult
+	scanCtx, cancelScan := context.WithCancel(ctx)
+	defer func() {
+		cancelScan()
+		if scanDone != nil {
+			<-scanDone
+		}
+	}()
 	events := make(chan mpvplayer.Event, 16)
 	var gate imageGate
 	var watchCancel context.CancelFunc
@@ -170,6 +186,35 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 		select {
 		case <-ctx.Done():
 			return nil
+		case scanned := <-scanDone:
+			scanDone = nil
+			err := scanned.err
+			if err == nil && ctx.Err() == nil {
+				gate.clear()
+				clearTimer()
+				retire()
+				o.app.preview.Cancel()
+				o.app.show("")
+				err = o.controller.ReplaceChannels(scanned.channels)
+				preview, previewErr := playback.NewPreview(o.controller.ChannelIDs(), o.app.preview.Delay())
+				if previewErr == nil {
+					o.app.preview = preview
+				}
+				err = errors.Join(err, previewErr)
+			}
+			if ctx.Err() != nil {
+				err = errors.Join(err, ctx.Err())
+			}
+			syncErr := reconcile()
+			err = errors.Join(err, syncErr)
+			if err != nil {
+				o.report(fmt.Errorf("rescan: %w", err))
+			}
+			scanReply <- OwnerResult{State: o.controller.Snapshot(), Running: o.controller.Running(), Generation: o.controller.Generation(), Err: err}
+			scanReply = nil
+			if syncErr != nil {
+				return syncErr
+			}
 		case <-gate.timerC:
 			gate.expire()
 			if gate.canAdvance() {
@@ -234,6 +279,21 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 			reason := ""
 			switch command.Kind {
 			case "status":
+			case "rescan":
+				if o.scan == nil {
+					err = errors.New("rescan unavailable")
+				} else if scanDone != nil {
+					err = catalog.ErrRescanInProgress
+				} else {
+					done := make(chan scanResult, 1)
+					scanDone = done
+					scanReply = request.reply
+					go func() {
+						channels, err := o.scan(scanCtx)
+						done <- scanResult{channels: channels, err: err}
+					}()
+					continue
+				}
 			case "volume", "mute":
 				client := o.player.Client()
 				if !o.controller.Running() || client == nil {

@@ -38,6 +38,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /channel", s.channelHandler)
 	mux.HandleFunc("POST /volume", s.volumeHandler)
 	mux.HandleFunc("POST /mute", s.muteHandler)
+	mux.HandleFunc("POST /rescan", s.rescanHandler)
 	mux.HandleFunc("GET /adapter", s.adapterHandler)
 	mux.HandleFunc("GET /events", s.eventsHandler)
 	mux.HandleFunc("GET /events.ndjson", s.ndjsonHandler)

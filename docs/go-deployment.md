@@ -104,6 +104,10 @@ STATE_DIR contains `catalog.json` and `state.json`. Media may be read-only; stat
 
 Explicit scan rebuilds the catalog from all roots supplied to that run. Cached roots are reused without automatic refresh otherwise. Root/path changes can change identities.
 
+For manual live refresh, use `curl --fail-with-body -i -X POST http://127.0.0.1:8080/rescan` from an SSH session on the appliance. The background scan uses the running instance's configured roots, with no periodic watcher. HTTP 204 waits for the catalog replacement and any playback restart; a second concurrent scan gets 409. Errors or an entirely empty replacement retain the old catalog; playback/persistence errors after replacement return 500 and are logged.
+
+On successful refresh, pending previews/preparation are retired and only the owned mpv child is replaced; X and CEC remain running. Preserve stopped playback, including stops observed during the scan. Verify surviving-channel position restore, deleted-file fallback, next-surviving-channel selection (wrapping in the previous order), new-channel previews, and no restart after source loss. Failed playback candidates/channels are tried once; their errors remain visible even if a later candidate succeeds. An unavailable root must fail the live scan rather than silently erase that root from the catalog.
+
 Successful starts save actual original media paths, including fallback candidates. Position observations apply the three-second audio/video rewind; images remain at zero. Save failures can leave disk state older than playback; inspect diagnostics and saved JSON rather than assuming a running player proves storage succeeded.
 
 Unexpected IPC loss stops playback and cancels pending work without fabricating EOF or automatically reclaiming input. Distinguish it from ordinary advancement.

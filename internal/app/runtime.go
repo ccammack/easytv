@@ -107,11 +107,7 @@ func RunRuntime(ctx context.Context, config RuntimeConfig, ready chan<- *Owner) 
 	if err != nil {
 		return err
 	}
-	ids := make([]string, len(channels))
-	for i, channel := range channels {
-		ids[i] = channel.Path
-	}
-	preview, err := playback.NewPreview(ids, playback.DefaultPreviewDelay)
+	preview, err := playback.NewPreview(controller.ChannelIDs(), playback.DefaultPreviewDelay)
 	if err != nil {
 		return err
 	}
@@ -122,6 +118,26 @@ func RunRuntime(ctx context.Context, config RuntimeConfig, ready chan<- *Owner) 
 	owner, err := NewOwner(controller, coordinator, player, config.Report)
 	if err != nil {
 		return err
+	}
+	owner.scan = func(scanCtx context.Context) ([]catalog.Channel, error) {
+		replacement, err := catalog.Scan(scanCtx, config.Roots)
+		if err != nil {
+			return nil, err
+		}
+		channels, err := catalog.ActiveChannels(replacement, config.Roots)
+		if err != nil {
+			return nil, err
+		}
+		if len(channels) == 0 {
+			return nil, errors.New("rescan found no playable channels; existing catalog retained")
+		}
+		if err := scanCtx.Err(); err != nil {
+			return nil, err
+		}
+		if err := catalog.SaveCatalog(filepath.Join(stateDir, "catalog.json"), replacement); err != nil {
+			return nil, fmt.Errorf("save rescanned catalog: %w", err)
+		}
+		return channels, nil
 	}
 	if ready != nil {
 		select {

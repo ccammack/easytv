@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"errors"
+	"github.com/ccammack/easytv/internal/catalog"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -12,6 +14,7 @@ type fakeControls struct {
 	volume    float64
 	muted     bool
 	calls     int
+	rescanErr error
 }
 
 func (c *fakeControls) ChangeChannel(_ context.Context, direction int) error {
@@ -28,6 +31,10 @@ func (c *fakeControls) SetMute(_ context.Context, value bool) error {
 	c.muted = value
 	c.calls++
 	return nil
+}
+func (c *fakeControls) Rescan(context.Context) error {
+	c.calls++
+	return c.rescanErr
 }
 func TestPlaybackControlValidationAndDispatch(t *testing.T) {
 	controls := &fakeControls{}
@@ -51,11 +58,45 @@ func TestPlaybackControlValidationAndDispatch(t *testing.T) {
 		if response.Code != test.want {
 			t.Fatalf("%s %s status=%d", test.path, test.body, response.Code)
 		}
+
 		if test.want == 400 && controls.calls != before {
 			t.Fatal("invalid request dispatched")
 		}
 	}
 	if controls.direction != -1 || controls.volume != 0 || controls.muted || controls.calls != 6 || server.sequence != 0 {
 		t.Fatalf("controls=%+v", controls)
+	}
+}
+
+func TestRescanHTTPContract(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		controls *fakeControls
+		want     int
+	}{
+		{"unavailable", nil, 503},
+		{"success", &fakeControls{}, 204},
+		{"busy", &fakeControls{rescanErr: catalog.ErrRescanInProgress}, 409},
+		{"failure", &fakeControls{rescanErr: errors.New("scan failed")}, 500},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := NewServer("easytv", nil)
+			if test.controls != nil {
+				server.SetPlaybackControls(test.controls)
+			}
+			response := httptest.NewRecorder()
+			server.Handler().ServeHTTP(response, httptest.NewRequest("POST", "/rescan", nil))
+			if response.Code != test.want || test.want == 204 && response.Body.Len() != 0 {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body)
+			}
+			if test.controls != nil && test.controls.calls != 1 {
+				t.Fatal("rescan not dispatched")
+			}
+			response = httptest.NewRecorder()
+			server.Handler().ServeHTTP(response, httptest.NewRequest("GET", "/rescan", nil))
+			if response.Code != 405 {
+				t.Fatalf("GET status=%d", response.Code)
+			}
+		})
 	}
 }
