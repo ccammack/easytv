@@ -22,6 +22,7 @@ type Config struct {
 	StopTimeout    time.Duration
 }
 type Player struct {
+	prefetched *preparedmedia.Result
 	config     Config
 	cmd        *exec.Cmd
 	client     *mpvipc.Client
@@ -85,8 +86,8 @@ func (p *Player) Start(file string, offset int64, generation uint64) (result err
 		return err
 	}
 	original := absolute
-	if p.config.Prepare != nil {
-		prepared, prepareErr := p.config.Prepare(context.Background(), original)
+	if p.config.Prepare != nil || p.prefetched != nil {
+		prepared, prepareErr := p.takePrepared(original)
 		if prepareErr != nil {
 			return fmt.Errorf("prepare media: %w", prepareErr)
 		}
@@ -98,6 +99,7 @@ func (p *Player) Start(file string, offset int64, generation uint64) (result err
 			return err
 		}
 	}
+
 	p.dir, err = os.MkdirTemp("/tmp", "etv-player-")
 	if err != nil {
 		return err

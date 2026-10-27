@@ -88,6 +88,7 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 	}
 	defer close(o.done)
 	events := make(chan mpvplayer.Event, 16)
+	var gate imageGate
 	var watchCancel context.CancelFunc
 	var watchDone chan error
 	var watched uint64
@@ -103,12 +104,14 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 	}
 	reconcile := func() error {
 		if !o.controller.Running() {
+			gate.clear()
 			retire()
 			return nil
 		}
 		if watchCancel != nil && watched == o.controller.Generation() {
 			return nil
 		}
+		gate.clear()
 		retire()
 		session, err := o.player.Session()
 		if err != nil {
@@ -120,7 +123,24 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 		done := make(chan error, 1)
 		watchDone = done
 		go func() { done <- session.Watch(watchCtx, events) }()
+		current, next := o.controller.MediaPaths()
+		gate.reset(ctx, watched, current, next, o.player.PrepareMedia)
 		return nil
+	}
+	advance := func(generation uint64, usePrepared bool) error {
+		if usePrepared && gate.result != nil {
+			if gate.result.err != nil {
+				o.report(gate.result.err)
+			} else if err := o.player.QueuePrepared(gate.result.media); err != nil {
+				o.report(err)
+			}
+		}
+		gate.clear()
+		retire()
+		if err := o.controller.Advance(generation); err != nil {
+			o.report(err)
+		}
+		return reconcile()
 	}
 	var previewTimer *time.Timer
 	var previewC <-chan time.Time
@@ -132,7 +152,12 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 		previewTimer = nil
 		previewC = nil
 	}
-	defer func() { clearTimer(); retire(); result = errors.Join(result, o.app.Stop()) }()
+	defer func() {
+		clearTimer()
+		gate.clear()
+		retire()
+		result = errors.Join(result, o.app.Stop())
+	}()
 	if err := o.controller.Start(); err != nil {
 		o.report(err)
 	}
@@ -143,9 +168,27 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-gate.timerC:
+			gate.expire()
+			if gate.canAdvance() {
+				if err := advance(gate.generation, true); err != nil {
+					return err
+				}
+			}
+		case prepared := <-gate.ready:
+			gate.accept(prepared)
+			if gate.canAdvance() {
+				if err := advance(gate.generation, true); err != nil {
+					return err
+				}
+			}
 		case <-previewC:
+			pending, ok := o.app.preview.Pending()
 			clearTimer()
-			retire()
+			if ok && (pending.ChannelID != o.controller.SelectedChannelID() || !o.controller.Running()) {
+				gate.clear()
+				retire()
+			}
 			if err := o.app.CommitPreview(previewSequence, time.Now()); err != nil {
 				o.report(err)
 			}
@@ -160,11 +203,10 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 			case "position":
 				o.controller.RecordPosition(event.Generation, int64(event.Seconds))
 			case "end-file", "process-exit":
-				retire()
-				if err := o.controller.Advance(event.Generation); err != nil {
-					o.report(err)
+				if event.Kind == "end-file" && gate.image {
+					continue
 				}
-				if err := reconcile(); err != nil {
+				if err := advance(event.Generation, event.Kind == "process-exit"); err != nil {
 					return err
 				}
 			case "ipc-error", "request-error":
@@ -181,6 +223,7 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 			case "start":
 				err = o.controller.Start()
 			case "stop":
+				gate.clear()
 				clearTimer()
 				retire()
 				err = o.app.Stop()
@@ -196,6 +239,7 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 			case "cec":
 				reason, err = o.app.HandleCEC(command.Message, command.Adapter)
 				if !o.controller.Running() {
+					gate.clear()
 					clearTimer()
 					retire()
 				}
