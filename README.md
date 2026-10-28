@@ -2,9 +2,7 @@
 
 EasyTV provides directory-based looping mpv channels for a Linux/Raspberry Pi appliance. The Go executable owns playback, persistence, optional Linux HDMI-CEC, optional HTTP controls, and optional channel-preview overlays.
 
-This README describes `cmd/easytv`. `easytv.exs` is retained as historical/reference source. The obsolete `volume.sh`, `power.sh`, and `channel.sh` hooks have been removed; Go controls mpv and CEC internally. The Go entrypoint does not install legacy evdev/FLIRC input handling.
-
-The historical Elixir reference still contains calls to those retired hooks. It is not a runnable rollback package as checked out; use a complete backed-up deployment or restore a matching earlier revision if legacy rollback is needed.
+This README describes `cmd/easytv`. The obsolete `volume.sh`, `power.sh`, and `channel.sh` hooks have been removed; Go controls mpv and CEC internally. The Go entrypoint does not install legacy evdev/FLIRC input handling.
 
 ## Validation boundary
 
@@ -392,7 +390,7 @@ curl --fail-with-body -i -H 'Content-Type: application/json' \
 
 ## Keyboard/FLIRC REST bridge
 
-The executable `scripts/easytv-remote.exs` script reads Linux input events and calls the running Go application's HTTP API. It does not launch a player, manage channels, control OS volume, or open CEC. It uses the old `easytv.exs` key mappings without running that legacy application.
+The executable `scripts/easytv-remote.exs` script reads Linux input events and calls the running Go application's HTTP API. It does not launch a player, manage channels, control OS volume, or open CEC.
 
 `sudo make install` deploys both services and installs Elixir/build prerequisites. The script has an Elixir shebang and uses `Mix.install` internally; it is not a Mix project or release. The installer runs its `--prepare` mode as `easytv` to populate the dependency cache under `/var/lib/easytv` without opening input devices. Normal service startup reuses that cache. Removing the cache, changing dependency declarations, or upgrading Elixir can require preparing it again with download access.
 
