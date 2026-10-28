@@ -420,7 +420,7 @@ Only key-down events are handled; releases and auto-repeat are ignored. The brid
 Bridge tests do not open input devices or download dependencies:
 
 ```bash
-elixir tests/keyboard_test.exs
+elixir tests/easytv_remote_test.exs
 ```
 
 ## CEC policy

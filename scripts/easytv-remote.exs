@@ -3,26 +3,22 @@
 defmodule EasyTV.Keyboard do
   require Logger
 
-  def action(:key_pageup), do: {"/channel", ~s({"direction":"previous"})}
-  def action(:key_pagedown), do: {"/channel", ~s({"direction":"next"})}
-  def action(:key_m), do: :mute
-
-  def action(key) when key in [:key_minus, :key_kpminus],
-    do: :volume_down
-
-  def action(key) when key in [:key_equal, :key_plus, :key_kpplus],
-    do: :volume_up
-
-  def action(:key_space), do: :power
+  def action(:key_pageup), do: channel_prev()
+  def action(:key_pagedown), do: channel_next()
+  def action(:key_m), do: mute()
+  def action(key) when key in [:key_minus, :key_kpminus], do: volume_down()
+  def action(key) when key in [:key_equal, :key_plus, :key_kpplus], do: volume_up()
+  def action(:key_space), do: power()
   def action(_), do: :ignore
 
-  # The remote controls TV power directly; do not infer or toggle TV state here.
-  def power, do: :ok
+  def channel_prev, do: {"/channel", ~s({"direction":"previous"})}
+  def channel_next, do: {"/channel", ~s({"direction":"next"})}
 
-  # The remote also controls TV volume/mute directly; avoid changing mpv twice.
-  def volume_up, do: :ok
-  def volume_down, do: :ok
-  def mute, do: :ok
+  # Stubs: the remote controls TV power, volume and mute directly.
+  def power, do: :ignore
+  def volume_up, do: :ignore
+  def volume_down, do: :ignore
+  def mute, do: :ignore
 
   def post(base, path, body) do
     request = {String.to_charlist(base <> path), [], ~c"application/json", body}
@@ -45,18 +41,6 @@ defmodule EasyTV.Keyboard do
         case action(key) do
           :ignore ->
             :ok
-
-          :power ->
-            power()
-
-          :volume_up ->
-            volume_up()
-
-          :volume_down ->
-            volume_down()
-
-          :mute ->
-            mute()
 
           {path, body} ->
             case post(base, path, body) do

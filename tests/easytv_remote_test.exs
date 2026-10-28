@@ -2,26 +2,28 @@ System.put_env("EASYTV_KEYBOARD_TEST", "1")
 Code.require_file("../scripts/easytv-remote.exs", __DIR__)
 ExUnit.start()
 
-defmodule KeyboardTest do
+defmodule EasyTVRemoteTest do
   use ExUnit.Case
   import ExUnit.CaptureLog
 
   test "legacy channel mappings and audio stubs" do
     assert EasyTV.Keyboard.action(:key_pageup) == {"/channel", ~s({"direction":"previous"})}
     assert EasyTV.Keyboard.action(:key_pagedown) == {"/channel", ~s({"direction":"next"})}
+    assert EasyTV.Keyboard.channel_prev() == {"/channel", ~s({"direction":"previous"})}
+    assert EasyTV.Keyboard.channel_next() == {"/channel", ~s({"direction":"next"})}
 
     for key <- [:key_equal, :key_plus, :key_kpplus],
-        do: assert(EasyTV.Keyboard.action(key) == :volume_up)
+        do: assert(EasyTV.Keyboard.action(key) == :ignore)
 
     for key <- [:key_minus, :key_kpminus],
-        do: assert(EasyTV.Keyboard.action(key) == :volume_down)
+        do: assert(EasyTV.Keyboard.action(key) == :ignore)
 
-    assert EasyTV.Keyboard.action(:key_m) == :mute
-    assert EasyTV.Keyboard.volume_up() == :ok
-    assert EasyTV.Keyboard.volume_down() == :ok
-    assert EasyTV.Keyboard.mute() == :ok
-    assert EasyTV.Keyboard.action(:key_space) == :power
-    assert EasyTV.Keyboard.power() == :ok
+    assert EasyTV.Keyboard.action(:key_m) == :ignore
+    assert EasyTV.Keyboard.volume_up() == :ignore
+    assert EasyTV.Keyboard.volume_down() == :ignore
+    assert EasyTV.Keyboard.mute() == :ignore
+    assert EasyTV.Keyboard.action(:key_space) == :ignore
+    assert EasyTV.Keyboard.power() == :ignore
     assert EasyTV.Keyboard.action(:key_q) == :ignore
   end
 
