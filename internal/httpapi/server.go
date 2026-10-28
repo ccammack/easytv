@@ -2,36 +2,27 @@ package httpapi
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/ccammack/easytv/internal/cec"
 	"net"
 	"net/http"
-	"sync"
 	"time"
 )
 
 // Backend is the context-aware serialized CEC service, never the raw adapter.
 type Backend interface {
-	AdapterInfo(context.Context) (cec.AdapterInfo, error)
 	SetPower(context.Context, bool) error
 	ClaimActiveSource(context.Context) error
 }
 
 type Server struct {
-	controls   PlaybackControls
-	mu         sync.Mutex
-	deviceName string
-	clients    map[*subscription]struct{}
-	streamID   string
-	sequence   uint64
-	backend    Backend
+	controls PlaybackControls
+	backend  Backend
 }
 
-func NewServer(deviceName string, backend Backend) *Server {
-	return &Server{deviceName: deviceName, clients: make(map[*subscription]struct{}), backend: backend, streamID: rand.Text()}
+func NewServer(backend Backend) *Server {
+	return &Server{backend: backend}
 }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -39,9 +30,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /volume", s.volumeHandler)
 	mux.HandleFunc("POST /mute", s.muteHandler)
 	mux.HandleFunc("POST /rescan", s.rescanHandler)
-	mux.HandleFunc("GET /adapter", s.adapterHandler)
-	mux.HandleFunc("GET /events", s.eventsHandler)
-	mux.HandleFunc("GET /events.ndjson", s.ndjsonHandler)
 	mux.HandleFunc("POST /power", s.powerHandler)
 	mux.HandleFunc("POST /active-source", s.activeSourceHandler)
 	return mux
@@ -80,8 +68,7 @@ func (s *Server) activeSourceHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// Serve owns only HTTP, not CEC polling. The runtime publishes received packets.
-// Cancel request contexts before Shutdown so idle streams can finish promptly.
+// Serve owns only HTTP, not CEC polling.
 func (s *Server) Serve(parent context.Context, listener net.Listener) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()

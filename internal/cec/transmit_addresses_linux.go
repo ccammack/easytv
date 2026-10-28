@@ -28,7 +28,7 @@ func (b *LinuxCECBackend) currentTransmitLogicalAddress() (uint8, error) {
 }
 
 // currentTransmitPhysicalAddress validates only outgoing address preparation.
-// Received packet operands and /adapter metadata remain unmodified.
+// Received packet operands and adapter metadata remain unmodified.
 func (b *LinuxCECBackend) currentTransmitPhysicalAddress() (uint16, error) {
 	var address uint16
 	if err := b.control(cecAdapGPhysAddr(), unsafe.Pointer(&address)); err != nil {

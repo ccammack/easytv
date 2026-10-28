@@ -26,6 +26,49 @@ func TestPollEmptyEventQueueUsesBoundedReceive(t *testing.T) {
 	}
 }
 
+func TestPollInterruptedOperationsYieldAndResume(t *testing.T) {
+	for _, stage := range []string{"readiness", "dequeue", "receive"} {
+		t.Run(stage, func(t *testing.T) {
+			b := NewLinuxCECBackend("/dev/unused")
+			interrupted := 0
+			b.eventReadyFn = func() (bool, error) {
+				if stage == "readiness" && interrupted < 3 {
+					interrupted++
+					return false, syscall.EINTR
+				}
+				return stage == "dequeue" && interrupted < 3, nil
+			}
+			b.ioctlFn = func(_ int, cmd uintptr, arg unsafe.Pointer) error {
+				if interrupted < 3 {
+					if (stage == "dequeue" && cmd != cecDQEvent()) ||
+						(stage == "receive" && cmd != cecReceive()) {
+						t.Fatal("unexpected ioctl")
+					}
+					interrupted++
+					return syscall.EINTR
+				}
+				if cmd != cecReceive() {
+					t.Fatal("expected receive after interruptions")
+				}
+				message := (*cecMsg)(arg)
+				message.Len = 2
+				message.Msg[0], message.Msg[1] = 0x0f, 0x36
+				return nil
+			}
+			for i := 0; i < 3; i++ {
+				packet, event, err := b.Poll()
+				if err != nil || packet != nil || event != nil || interrupted != i+1 {
+					t.Fatalf("interrupted poll: packet=%+v event=%+v err=%v count=%d", packet, event, err, interrupted)
+				}
+			}
+			packet, event, err := b.Poll()
+			if err != nil || event != nil || packet == nil || packet.Raw != "0f36" {
+				t.Fatalf("resumed poll: packet=%+v event=%+v err=%v", packet, event, err)
+			}
+		})
+	}
+}
+
 func TestPollPropagatesEventFailures(t *testing.T) {
 	for _, readinessFailure := range []bool{false, true} {
 		b := NewLinuxCECBackend("/dev/unused")
@@ -44,6 +87,20 @@ func TestPollPropagatesEventFailures(t *testing.T) {
 		if _, _, err := b.Poll(); !errors.Is(err, syscall.EIO) {
 			t.Fatalf("error=%v", err)
 		}
+	}
+}
+
+func TestPollPropagatesReceiveFailure(t *testing.T) {
+	b := NewLinuxCECBackend("/dev/unused")
+	b.eventReadyFn = func() (bool, error) { return false, nil }
+	b.ioctlFn = func(_ int, cmd uintptr, _ unsafe.Pointer) error {
+		if cmd != cecReceive() {
+			t.Fatal("expected receive")
+		}
+		return syscall.EIO
+	}
+	if _, _, err := b.Poll(); !errors.Is(err, syscall.EIO) {
+		t.Fatalf("error=%v", err)
 	}
 }
 

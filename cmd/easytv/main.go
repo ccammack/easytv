@@ -24,7 +24,6 @@ func runWithBackendFactory(ctx context.Context, args []string, stdout, stderr io
 	osdEnabled := flags.Bool("osd", false, "enable aosd_cat channel previews; requires real output and an existing X session")
 	device := flags.String("cec-device", "", "explicit CEC device path; empty disables CEC in headless mode")
 	listen := flags.String("listen", "", "optional HTTP bind address, e.g. 127.0.0.1:8080; disabled when empty")
-	deviceName := flags.String("device-name", "rpi-tv", "device_name in the legacy HTTP protocol")
 	scan := flags.Bool("scan", false, "rebuild the catalog for supplied media roots")
 	stateDir := flags.String("state-dir", "", "explicit isolated state/catalog directory (required)")
 	tempDir := flags.String("temp-dir", "", "explicit temporary workspace parent (required)")
@@ -71,7 +70,7 @@ func runWithBackendFactory(ctx context.Context, args []string, stdout, stderr io
 		runtimeCtx, cancel = context.WithTimeout(ctx, *runFor)
 	}
 	defer cancel()
-	config := app.RuntimeConfig{HTTPListener: listener, DeviceName: *deviceName, Roots: flags.Args(), StateDir: *stateDir, TempDir: *tempDir, Scan: *scan, Player: mpvplayer.Config{OutputArgs: playerOutputArgs(*headless)}, ClaimSource: func() error { return nil }, Show: showPreview, Report: func(err error) { fmt.Fprintf(stderr, "easytv: %v\n", err) }}
+	config := app.RuntimeConfig{HTTPListener: listener, Roots: flags.Args(), StateDir: *stateDir, TempDir: *tempDir, Scan: *scan, Player: mpvplayer.Config{OutputArgs: playerOutputArgs(*headless)}, ClaimSource: func() error { return nil }, Show: showPreview, Report: func(err error) { fmt.Fprintf(stderr, "easytv: %v\n", err) }}
 	ready := make(chan *app.Owner, 1)
 	finished := make(chan error, 1)
 	go func() {

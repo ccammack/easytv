@@ -38,7 +38,7 @@ func (c *fakeControls) Rescan(context.Context) error {
 }
 func TestPlaybackControlValidationAndDispatch(t *testing.T) {
 	controls := &fakeControls{}
-	server := NewServer("easytv", nil)
+	server := NewServer(nil)
 	server.SetPlaybackControls(controls)
 	for _, test := range []struct {
 		path, body string
@@ -63,7 +63,7 @@ func TestPlaybackControlValidationAndDispatch(t *testing.T) {
 			t.Fatal("invalid request dispatched")
 		}
 	}
-	if controls.direction != -1 || controls.volume != 0 || controls.muted || controls.calls != 6 || server.sequence != 0 {
+	if controls.direction != -1 || controls.volume != 0 || controls.muted || controls.calls != 6 {
 		t.Fatalf("controls=%+v", controls)
 	}
 }
@@ -80,7 +80,7 @@ func TestRescanHTTPContract(t *testing.T) {
 		{"failure", &fakeControls{rescanErr: errors.New("scan failed")}, 500},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			server := NewServer("easytv", nil)
+			server := NewServer(nil)
 			if test.controls != nil {
 				server.SetPlaybackControls(test.controls)
 			}

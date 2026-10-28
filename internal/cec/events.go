@@ -3,7 +3,7 @@ package cec
 import "time"
 
 // AdapterEvent is kernel adapter metadata, not a received CEC packet.
-// It is logged separately and never published on the receive stream.
+// It is logged separately from playback observations.
 type AdapterEvent struct {
 	ReceivedAt         time.Time  `json:"received_at"`
 	KernelTimestampNS  uint64     `json:"kernel_timestamp_ns"`

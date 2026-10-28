@@ -85,7 +85,7 @@ Fake helpers validate lifecycle/arguments, not X rendering, available fonts, vis
 
 ## CEC and HTTP acceptance details
 
-Read logical/physical addresses from `/adapter`, not hardcoded numbers. `--device-name` labels HTTP metadata, not HDMI-CEC identity.
+Adapter logical/physical addresses and received bus packets are internal: the service reads current kernel metadata rather than hardcoding addresses. HTTP exposes `/power` and `/active-source` actions, not adapter metadata or event feeds. The metadata-only `--device-name` option has been removed.
 
 - Each accepted channel request asserts Active Source with CEC enabled, before delayed commit. HTTP success does not prove the eventual TV/input state.
 - Other Active Source and applicable TV standby observations stop playback. There is no loop that automatically fights another input.
@@ -93,7 +93,7 @@ Read logical/physical addresses from `/adapter`, not hardcoded numbers. `--devic
 - Power-off transmits broadcast STANDBY. Review effects on the attached HDMI setup before sending it. `/power` requests transmission, not an atomic local playback stop; local stop policy reacts to accepted received observations.
 - Power-on or Active Source assertion does not itself resume a stopped player. An intentional channel request can restart playback.
 - Volume/mute affect the current mpv instance, not TV hardware volume, and are not persisted across player replacement.
-- SSE/NDJSON contain received packets only, with no replay across reconnect gaps. Outgoing commands and adapter diagnostics are not synthetic receive events.
+- Interrupted readiness/dequeue/receive calls must not terminate the runtime; real adapter failures remain reported. Adapter diagnostics are available through the application user's journal; see the [logging instructions](../README.md#check-startup-and-playback-logs).
 - There is no inferred-TV-state `/status` or public REST playback start/stop endpoint.
 
 HTTP has no built-in authentication/TLS. Keep acceptance local/trusted. Any remote-access arrangement needs separately reviewed protection; a bind address is not authentication.

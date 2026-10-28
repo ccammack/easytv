@@ -14,11 +14,7 @@ type Observation struct {
 }
 type serviceRequest struct {
 	operation string
-	reply     chan serviceReply
-}
-type serviceReply struct {
-	info AdapterInfo
-	err  error
+	reply     chan error
 }
 
 // Service exclusively serializes Backend access. Backend calls and packet
@@ -43,7 +39,6 @@ func NewService(backend Backend, device string) (*Service, error) {
 	return &Service{backend: backend, device: device, requests: make(chan serviceRequest), observations: make(chan Observation, 64), diagnostics: make(chan AdapterEvent, 64), ready: make(chan struct{}), done: make(chan struct{})}, nil
 }
 func (s *Service) Ready() <-chan struct{}           { return s.ready }
-func (s *Service) Done() <-chan struct{}            { return s.done }
 func (s *Service) Observations() <-chan Observation { return s.observations }
 func (s *Service) Diagnostics() <-chan AdapterEvent { return s.diagnostics }
 func copyAdapter(info AdapterInfo) AdapterInfo {
@@ -77,21 +72,18 @@ func (s *Service) Run(ctx context.Context) (result error) {
 		case <-ctx.Done():
 			return nil
 		case request := <-s.requests:
-			var reply serviceReply
+			var err error
 			switch request.operation {
 			case "claim":
-				reply.err = s.backend.ClaimActiveSource()
+				err = s.backend.ClaimActiveSource()
 			case "power-on":
-				reply.err = s.backend.SetPower(true)
+				err = s.backend.SetPower(true)
 			case "power-off":
-				reply.err = s.backend.SetPower(false)
-			case "adapter":
-				reply.info, reply.err = s.backend.AdapterInfo()
-				reply.info = copyAdapter(reply.info)
+				err = s.backend.SetPower(false)
 			default:
-				reply.err = errors.New("unknown CEC service operation")
+				err = errors.New("unknown CEC service operation")
 			}
-			request.reply <- reply
+			request.reply <- err
 		default:
 			message, diagnostic, err := s.backend.Poll()
 			if err != nil {
@@ -118,11 +110,11 @@ func (s *Service) Run(ctx context.Context) (result error) {
 		}
 	}
 }
-func (s *Service) call(ctx context.Context, operation string) (serviceReply, error) {
+func (s *Service) call(ctx context.Context, operation string) error {
 	if err := ctx.Err(); err != nil {
-		return serviceReply{}, err
+		return err
 	}
-	request := serviceRequest{operation: operation, reply: make(chan serviceReply, 1)}
+	request := serviceRequest{operation: operation, reply: make(chan error, 1)}
 	stopped := func() error {
 		if s.err != nil {
 			return s.err
@@ -132,32 +124,26 @@ func (s *Service) call(ctx context.Context, operation string) (serviceReply, err
 	select {
 	case s.requests <- request:
 	case <-ctx.Done():
-		return serviceReply{}, ctx.Err()
+		return ctx.Err()
 	case <-s.done:
-		return serviceReply{}, stopped()
+		return stopped()
 	}
 	select {
-	case reply := <-request.reply:
-		return reply, reply.err
+	case err := <-request.reply:
+		return err
 	case <-ctx.Done():
-		return serviceReply{}, ctx.Err()
+		return ctx.Err()
 	case <-s.done:
-		return serviceReply{}, stopped()
+		return stopped()
 	}
 }
 func (s *Service) ClaimActiveSource(ctx context.Context) error {
-	_, err := s.call(ctx, "claim")
-	return err
+	return s.call(ctx, "claim")
 }
 func (s *Service) SetPower(ctx context.Context, on bool) error {
 	operation := "power-off"
 	if on {
 		operation = "power-on"
 	}
-	_, err := s.call(ctx, operation)
-	return err
-}
-func (s *Service) AdapterInfo(ctx context.Context) (AdapterInfo, error) {
-	reply, err := s.call(ctx, "adapter")
-	return reply.info, err
+	return s.call(ctx, operation)
 }

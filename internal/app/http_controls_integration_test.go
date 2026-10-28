@@ -50,7 +50,7 @@ func TestRealHTTPPlaybackControlsUseOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	ipc := p.Client()
-	server := httpapi.NewServer("rpi-tv", nil)
+	server := httpapi.NewServer(nil)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

@@ -125,6 +125,39 @@ func TestCECServiceFailureUnblocksCallAndClosesBackend(t *testing.T) {
 	}
 }
 
+type failedMetadataBackend struct {
+	serviceBackend
+	failure error
+}
+
+func (b *failedMetadataBackend) AdapterInfo() (AdapterInfo, error) {
+	return AdapterInfo{}, b.failure
+}
+
+func TestCECServiceDoesNotForwardPacketWithoutCurrentMetadata(t *testing.T) {
+	failure := errors.New("adapter metadata unavailable")
+	b := &failedMetadataBackend{
+		serviceBackend: serviceBackend{packets: make(chan ReceivedMessage, 1)},
+		failure:        failure,
+	}
+	b.packets <- ReceivedMessage{Raw: "4f822000", Length: 4}
+	service, err := NewService(b, "mock-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := service.Run(ctx); !errors.Is(err, failure) {
+		t.Fatalf("error=%v", err)
+	}
+	if observation, ok := <-service.Observations(); ok {
+		t.Fatalf("packet forwarded without current metadata: %+v", observation)
+	}
+	if b.closed.Load() != 1 {
+		t.Fatal("backend not closed")
+	}
+}
+
 func TestCECServiceRejectsInvalidConstruction(t *testing.T) {
 	if _, err := NewService(nil, ""); err == nil {
 		t.Fatal("invalid service accepted")

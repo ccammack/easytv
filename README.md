@@ -1,6 +1,6 @@
 # EasyTV (Go)
 
-EasyTV provides directory-based looping mpv channels for a Linux/Raspberry Pi appliance. The Go executable owns playback, persistence, optional Linux HDMI-CEC, optional HTTP controls/received-packet streams, and optional channel-preview overlays.
+EasyTV provides directory-based looping mpv channels for a Linux/Raspberry Pi appliance. The Go executable owns playback, persistence, optional Linux HDMI-CEC, optional HTTP controls, and optional channel-preview overlays.
 
 This README describes `cmd/easytv`. `easytv.exs` is retained as historical/reference source. The obsolete `volume.sh`, `power.sh`, and `channel.sh` hooks have been removed; Go controls mpv and CEC internally. The Go entrypoint does not install legacy evdev/FLIRC input handling.
 
@@ -113,6 +113,79 @@ sudo reboot
 
 The service uses `startx` to authorize and start X without `.xinitrc` or `.bash_profile`; there is no shell autologin requirement. It waits for the configured media mounts, disables X screen blanking/DPMS, logs to the journal, and restarts the session after exit. EasyTV attempts playback automatically, but does **not** wake the television or select its HDMI input at startup. A running service is not proof of visible output; validate on the target Pi.
 
+### Set HDMI output to 720p
+
+For the supplied Xorg service on a Pi 4, configure Xorg to prefer 1280x720 before mpv starts. This was verified across a service restart and reboot on Raspberry Pi OS Lite based on Debian 13 Trixie. A kernel boot-resolution argument alone is insufficient: Xorg can override it with the TV's preferred 4K mode.
+
+With the service running, identify the connected Xorg output:
+
+```bash
+sudo -u easytv env DISPLAY=:0 XAUTHORITY=/run/easytv/Xauthority xrandr --current
+```
+
+If `xrandr` is missing, install it with `sudo apt install x11-xserver-utils`. The following example uses `HDMI-1`; substitute the connected output name reported on your Pi. Confirm that `1280x720` at 60 Hz is listed.
+
+Create a local Xorg monitor configuration:
+
+```bash
+sudo mkdir -p /etc/X11/xorg.conf.d
+sudo nano /etc/X11/xorg.conf.d/10-easytv-monitor.conf
+```
+
+If the file already exists, preserve its existing configuration rather than blindly overwriting it. Add:
+
+```text
+Section "Monitor"
+    Identifier "HDMI-1"
+    Option "PreferredMode" "1280x720"
+EndSection
+```
+
+Restart the entire session so both Xorg and the new mpv window start at the correct size. This interrupts playback:
+
+```bash
+sudo systemctl restart easytv.service
+sudo -u easytv env DISPLAY=:0 XAUTHORITY=/run/easytv/Xauthority xrandr --current
+```
+
+Allow time for Xorg to start before checking. Expect `current 1280 x 720` and `1280x720 60.00*+`: `*` marks the active mode and `+` the preferred mode. Other modes, including 4K, may still be listed; this is a startup preference, not a hard cap. Avoid changing resolution underneath a running player: its window may retain the old dimensions and appear cropped.
+
+Once playback fills the screen, reboot and repeat the check to verify unattended startup:
+
+```bash
+sudo reboot
+```
+
+To undo this setup, remove only the configuration file you added and restart the service. This configuration affects other Xorg sessions using the same output too.
+
+Optionally, set the initial console/KMS mode in `/boot/firmware/cmdline.txt` as well. Back up the file first, preserve its single-line format and all unrelated arguments, and replace any existing argument for that connector rather than adding a duplicate:
+
+```text
+video=HDMI-A-1:1280x720@60D
+```
+
+Kernel connector names differ from Xorg output names: `HDMI-A-1` normally selects HDMI0, and `HDMI-A-2` the second port. `D` forces digital output enabled even when the TV is off at boot. Older OS releases may use `/boot/cmdline.txt`. Boot-command-line changes require a reboot and do not replace the Xorg configuration above.
+
+This changes HDMI output resolution, not source-video resolution or decoding cost. A 4K source can still play poorly at 720p output; use suitable media and verify playback on the actual Pi. EasyTV does not transcode media or modify the OS display configuration, and the installer leaves boot settings untouched.
+
+### Check startup and playback logs
+
+Check service lifecycle messages and the application user's logs for the current boot:
+
+```bash
+systemctl status easytv.service --no-pager -l
+sudo journalctl -u easytv.service -b --no-pager -n 100
+sudo journalctl -b _UID="$(id -u easytv)" --no-pager -n 200
+```
+
+The PAM/logind X session can place EasyTV and mpv messages outside the service-unit journal filter. Do not rely on `-u easytv.service` alone when diagnosing playback. Follow application/session logs live while reproducing a failure:
+
+```bash
+sudo journalctl -b _UID="$(id -u easytv)" -f
+```
+
+For a recent failure, replace `-f` with `--since "10 minutes ago" --no-pager`. To inspect the previous boot, replace `-b` with `-b -1` (if that boot's journal was retained). Capture logs before restarting so the failure's context is preserved.
+
 ### Audio responsibility
 
 EasyTV lets mpv select its audio backend/device. Volume and mute requests only send mpv IPC commands; EasyTV does not change OS or TV volume, select an audio route, or repair sound configuration. Installing mpv alone does not guarantee audible playback: the OS's audio setup and the `easytv` user's device/session access must already work. Diagnose silent playback or ineffective volume controls with mpv and Raspberry Pi OS, outside EasyTV.
@@ -212,7 +285,6 @@ One or more media roots are required. Both storage flags are required; the progr
 | `--cec-device` | empty | Explicit Linux CEC device; required for non-headless output. Supplying it in headless mode still enables physical CEC. |
 | `--osd` | false | Enable owned `aosd_cat` channel previews; incompatible with headless mode. |
 | `--listen` | empty | Optional HTTP bind address, for example `127.0.0.1:8080`; empty disables HTTP. |
-| `--device-name` | `rpi-tv` | Name in HTTP adapter/event metadata, not the HDMI-CEC OSD identity. |
 | `--scan` | false | Rebuild catalog from supplied roots. |
 | `--state-dir` | empty, required | Directory containing `state.json` and `catalog.json`. |
 | `--temp-dir` | empty, required | Parent of the runtime's private preparation workspace. |
@@ -256,9 +328,6 @@ HTTP is disabled unless `--listen` is supplied. There is no built-in authenticat
 | `POST` | `/rescan` | No body; refresh configured media roots and apply the result before returning 204. Concurrent rescan: 409; failures: 500. |
 | `POST` | `/power` | JSON `{"state":"on"}` or `{"state":"off"}`; requires CEC. |
 | `POST` | `/active-source` | No body required; explicit CEC Active Source assertion. |
-| `GET` | `/adapter` | Current adapter metadata/logical and physical addresses; requires CEC. |
-| `GET` | `/events` | Live received-packet SSE stream. |
-| `GET` | `/events.ndjson` | Live received-packet newline-delimited JSON stream. |
 
 Successful controls return HTTP 204. Channel success acknowledges accepted preview scheduling, not the delayed commit. With CEC enabled, every accepted channel request asserts Active Source immediately. Rapid requests move the pending selection and reset its two-second delay. Wrapping to the current channel does not restart an already-running player.
 
@@ -277,21 +346,15 @@ curl --fail-with-body -i -H 'Content-Type: application/json' \
   -d '{"muted":false}' http://127.0.0.1:8080/mute
 ```
 
-## CEC policy and receive streams
+## CEC policy
 
-The backend owns adapter access exclusively. Outgoing commands and received-observation evaluation use current kernel addresses; read `/adapter` instead of hardcoding a logical address.
+The internal CEC service owns adapter access exclusively and reads current kernel logical/physical addresses for commands and received-observation evaluation. It passes each received packet with its current adapter metadata directly to the playback owner. Bus monitoring remains active even when HTTP is disabled; it does not require public event streams or a separate CEC server.
 
 Applicable observations of another Active Source, TV-reported standby/transition to standby, or TV standby addressed to the appliance/broadcast stop playback. Malformed, unrelated, or insufficient-identity observations do not establish source loss. Routing-message policy is not implemented as a substitute. There is no repeated input-seizing loop or inferred TV-state `/status` endpoint.
 
-SSE/NDJSON contain received packets, not fabricated power/source events or outgoing-command echoes. Fields include `id`, `event` (`cec_message_received`), `device_name`, `received_at`, `raw`, `length`, `initiator`, `destination`, `opcode`, `message_name`, and optional operands/validation errors. Receipt time is userspace time. Kernel adapter diagnostics/loss notices are logged separately.
+HTTP exposes only the CEC actions `/power` and `/active-source`, alongside playback controls. The former `/adapter`, `/events`, and `/events.ndjson` endpoints and metadata-only `--device-name` option have been removed. Adapter information and received packets remain internal. Kernel adapter diagnostics/loss notices are logged; see [Check startup and playback logs](#check-startup-and-playback-logs).
 
-```bash
-curl --no-buffer --fail http://127.0.0.1:8080/events
-# Alternative transport; choose one or run in another terminal:
-curl --no-buffer --fail http://127.0.0.1:8080/events.ndjson
-```
-
-Streams are live with no replay. A nonempty `Last-Event-ID` is rejected with HTTP 409; reconnect without it for a fresh subscription. Gap events cannot be recovered. Slow subscribers are disconnected on overflow or failed/bounded writes rather than silently dropping a packet and continuing. Service-level queue overflow is a runtime failure. Kernel packet loss cannot be recovered here, and an idle stream can remain silent.
+Interrupted CEC readiness, event-dequeue, and receive calls yield to the service loop and are polled again rather than ending playback. Genuine adapter errors and internal queue overflow remain explicit runtime failures. Transmit calls are not blindly retried, which could duplicate a command already queued by the kernel. Kernel packet loss cannot be recovered here.
 
 ## Tests and operational limits
 

@@ -19,7 +19,6 @@ import (
 // Hardware opening and executable defaults belong to the eventual entrypoint.
 type RuntimeConfig struct {
 	HTTPListener net.Listener
-	DeviceName   string
 	httpServer   *httpapi.Server
 	Roots        []string
 	StateDir     string
@@ -154,7 +153,7 @@ func RunRuntime(ctx context.Context, config RuntimeConfig, ready chan<- *Owner) 
 	}
 	server := config.httpServer
 	if server == nil {
-		server = httpapi.NewServer(config.DeviceName, nil)
+		server = httpapi.NewServer(nil)
 	}
 	return serveOwner(ctx, cancel, owner, server, config.HTTPListener)
 }

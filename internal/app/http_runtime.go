@@ -32,15 +32,3 @@ func serveOwner(ctx context.Context, cancel context.CancelFunc, owner *Owner, se
 	}
 	return errors.Join(ownerErr, httpErr)
 }
-
-type streamPublishingOwner struct {
-	owner  *Owner
-	server *httpapi.Server
-}
-
-func (s *streamPublishingOwner) Submit(ctx context.Context, command OwnerCommand) (OwnerResult, error) {
-	if command.Kind == "cec" {
-		s.server.PublishReceived(command.Message)
-	}
-	return s.owner.Submit(ctx, command)
-}

@@ -243,14 +243,18 @@ func (b *LinuxCECBackend) transmit(m *cecMsg) error {
 // Poll returns one received packet or a separate kernel adapter event.
 // Receive waits at most 500ms so the caller can observe shutdown.
 // Packets are decoded without inferring source or power state.
+// Interrupted waits yield to the service loop to check commands and cancellation.
 func (b *LinuxCECBackend) Poll() (*ReceivedMessage, *AdapterEvent, error) {
 	if diagnostic, err := b.dequeueEvent(); err != nil || diagnostic != nil {
+		if errors.Is(err, syscall.EINTR) {
+			return nil, nil, nil
+		}
 		return nil, diagnostic, err
 	}
 	var m cecMsg
 	m.Timeout = 500
 	if err := b.control(cecReceive(), unsafe.Pointer(&m)); err != nil {
-		if errors.Is(err, syscall.ETIMEDOUT) || errors.Is(err, syscall.EAGAIN) {
+		if errors.Is(err, syscall.ETIMEDOUT) || errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EINTR) {
 			return nil, nil, nil
 		}
 		return nil, nil, err

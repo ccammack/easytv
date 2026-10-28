@@ -66,7 +66,7 @@ func RunCECRuntime(ctx context.Context, config RuntimeConfig, backend cec.Backen
 	}()
 	config.ClaimSource = func() error { return service.ClaimActiveSource(runCtx) }
 	if config.HTTPListener != nil {
-		config.httpServer = httpapi.NewServer(config.DeviceName, service)
+		config.httpServer = httpapi.NewServer(service)
 	}
 	ownerReady := make(chan *Owner, 1)
 	runtimeDone = make(chan error, 1)
@@ -86,12 +86,8 @@ func RunCECRuntime(ctx context.Context, config RuntimeConfig, backend cec.Backen
 		return err
 	case owner = <-ownerReady:
 	}
-	var forwardOwner OwnerSubmitter = owner
-	if config.httpServer != nil {
-		forwardOwner = &streamPublishingOwner{owner: owner, server: config.httpServer}
-	}
 	forwardDone = make(chan error, 1)
-	go func() { forwardDone <- ForwardCEC(runCtx, service.Observations(), forwardOwner, config.Report) }()
+	go func() { forwardDone <- ForwardCEC(runCtx, service.Observations(), owner, config.Report) }()
 	if ready != nil {
 		select {
 		case ready <- owner:
