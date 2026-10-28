@@ -169,6 +169,26 @@ Kernel connector names differ from Xorg output names: `HDMI-A-1` normally select
 
 This changes HDMI output resolution, not source-video resolution or decoding cost. A 4K source can still play poorly at 720p output; use suitable media and verify playback on the actual Pi. EasyTV does not transcode media or modify the OS display configuration, and the installer leaves boot settings untouched.
 
+### Route audio to HDMI
+
+EasyTV leaves audio routing to Raspberry Pi OS and mpv. The installer cannot choose an HDMI port because it depends on which port your TV is plugged into. After installing EasyTV, use Raspberry Pi OS's audio selector to choose that port. Run this as your normal administrator account:
+
+```bash
+sudo env SUDO_USER=easytv raspi-config
+```
+
+`SUDO_USER=easytv` tells `raspi-config` to save the ALSA default for the `easytv` service account, not your personal login. Do not run plain `sudo raspi-config` for this step: that can configure the wrong user's audio. The `easytv` account's home is `/var/lib/easytv`.
+
+In the menu, choose **System Options** → **Audio**. Raspberry Pi models with two HDMI ports show two HDMI audio devices (often named `vc4-hdmi-0` and `vc4-hdmi-1`); choose the one corresponding to the port connected to your TV. The names identify the Pi's HDMI outputs, not the TV or cable. If you are unsure which is connected, select one, finish the menu, restart EasyTV and test sound; if silent, repeat and select the other HDMI device.
+
+Restart EasyTV so mpv reopens audio using the selected OS output. This interrupts playback:
+
+```bash
+sudo systemctl restart easytv.service
+```
+
+If `raspi-config` reports that PulseAudio or PipeWire manages audio, use that audio server's output selector instead. EasyTV does not configure audio servers or control the TV's volume.
+
 ### Check startup and playback logs
 
 Check service lifecycle messages and the application user's logs for the current boot:
