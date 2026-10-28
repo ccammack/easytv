@@ -22,7 +22,7 @@ func runWithBackendFactory(ctx context.Context, args []string, stdout, stderr io
 	flags.SetOutput(stderr)
 	headless := flags.Bool("headless", false, "use null audio/video outputs; CEC remains disabled unless explicitly selected")
 	osdEnabled := flags.Bool("osd", false, "enable aosd_cat channel previews; requires real output and an existing X session")
-	device := flags.String("cec-device", "", "explicit CEC device path; empty disables CEC in headless mode")
+	device := flags.String("cec-device", "", "optional CEC device path; empty disables CEC independently of video output")
 	listen := flags.String("listen", "", "optional HTTP bind address, e.g. 127.0.0.1:8080; disabled when empty")
 	scan := flags.Bool("scan", false, "rebuild the catalog for supplied media roots")
 	stateDir := flags.String("state-dir", "", "explicit isolated state/catalog directory (required)")
@@ -37,9 +37,6 @@ func runWithBackendFactory(ctx context.Context, args []string, stdout, stderr io
 			return nil
 		}
 		return err
-	}
-	if !*headless && *device == "" {
-		return errors.New("real output requires an explicit --cec-device; use --headless for isolated playback")
 	}
 	if *device != "" && factory == nil {
 		return errors.New("CEC backend factory required")

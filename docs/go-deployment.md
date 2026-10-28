@@ -71,7 +71,7 @@ Readiness does not itself power on the TV or claim Active Source. Explicit contr
 
 ## Stage 3: physical OSD (separate approval)
 
-After display/CEC acceptance, repeat the bounded hardware invocation with `--osd` added. It cannot be combined with headless. The CLI still requires a CEC device for non-headless output even if the immediate goal is checking an overlay.
+After display/CEC acceptance, repeat the bounded hardware invocation with `--osd` added. It cannot be combined with headless. For display/overlay testing without CEC, omit `--cec-device`; normal video output does not require CEC.
 
 Issue an intentional channel request and check:
 
@@ -94,7 +94,7 @@ Adapter logical/physical addresses and received bus packets are internal: the se
 - Power-on or Active Source assertion does not itself resume a stopped player. An intentional channel request can restart playback.
 - Volume/mute affect the current mpv instance, not TV hardware volume, and are not persisted across player replacement.
 - Interrupted readiness/dequeue/receive calls must not terminate the runtime; real adapter failures remain reported. Adapter diagnostics are available through the application user's journal; see the [logging instructions](../README.md#check-startup-and-playback-logs).
-- There is no inferred-TV-state `/status` or public REST playback start/stop endpoint.
+- `/status` reports only local playback state, not inferred TV state. There are no public REST playback start/stop endpoints.
 
 HTTP has no built-in authentication/TLS. Keep acceptance local/trusted. Any remote-access arrangement needs separately reviewed protection; a bind address is not authentication.
 

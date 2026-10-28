@@ -38,10 +38,13 @@ func TestHTTPControlContract(t *testing.T) {
 		{"POST", "/power", `{"state":"off"}`, 204},
 		{"POST", "/power", `{"state":"standby"}`, 400},
 		{"POST", "/power", `bad json`, 400},
+		{"POST", "/power", `{"state":"on","extra":true}`, 400},
+		{"POST", "/power", `{"state":"on"} {}`, 400},
+		{"POST", "/power", `{"state":"on","padding":"` + strings.Repeat("x", 4096) + `"}`, 400},
 		{"POST", "/active-source", "", 204},
 		{"GET", "/active-source", "", 405},
 		{"GET", "/state", "", 404},
-		{"GET", "/status", "", 404},
+		{"GET", "/status", "", 503},
 	} {
 		request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
 		response := httptest.NewRecorder()

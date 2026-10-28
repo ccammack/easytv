@@ -60,7 +60,11 @@ func TestRecoveryDefaultWaitsTenSeconds(t *testing.T) {
 		t.Fatal(ctx.Err())
 	}
 	short, cancelShort := context.WithTimeout(ctx, time.Second)
-	rescanSubmit(t, owner, short, OwnerCommand{Kind: "status"})
+	status := rescanSubmit(t, owner, short, OwnerCommand{Kind: "status"})
+	if status.Status.Playback != "retrying" || status.Status.ChannelID != "/Channel One" ||
+		status.Status.LastError == "" || status.Status.NextRetryAt == nil {
+		t.Fatalf("recovery status=%+v", status.Status)
+	}
 	cancelShort()
 	select {
 	case attempted := <-retried:

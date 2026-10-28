@@ -186,6 +186,8 @@ sudo journalctl -b _UID="$(id -u easytv)" -f
 
 For a recent failure, replace `-f` with `--since "10 minutes ago" --no-pager`. To inspect the previous boot, replace `-b` with `-b -1` (if that boot's journal was retained). Capture logs before restarting so the failure's context is preserved.
 
+Playback transition logs include startup, channel commit, file advancement, retry scheduling, recovery, and CEC stop reasons, with channel/file context. Position updates and ordinary CEC traffic are not logged individually.
+
 ### Audio responsibility
 
 EasyTV lets mpv select its audio backend/device. Volume and mute requests only send mpv IPC commands; EasyTV does not change OS or TV volume, select an audio route, or repair sound configuration. Installing mpv alone does not guarantee audible playback: the OS's audio setup and the `easytv` user's device/session access must already work. Diagnose silent playback or ineffective volume controls with mpv and Raspberry Pi OS, outside EasyTV.
@@ -282,7 +284,7 @@ One or more media roots are required. Both storage flags are required; the progr
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--headless` | false | Null mpv audio/video outputs; CEC disabled unless a device is supplied. |
-| `--cec-device` | empty | Explicit Linux CEC device; required for non-headless output. Supplying it in headless mode still enables physical CEC. |
+| `--cec-device` | empty | Optional Linux CEC device; omit to disable CEC independently of video output. Supplying it in headless mode still enables physical CEC. |
 | `--osd` | false | Enable owned `aosd_cat` channel previews; incompatible with headless mode. |
 | `--listen` | empty | Optional HTTP bind address, for example `127.0.0.1:8080`; empty disables HTTP. |
 | `--scan` | false | Rebuild catalog from supplied roots. |
@@ -291,6 +293,8 @@ One or more media roots are required. Both storage flags are required; the progr
 | `--run-for` | zero/unbounded | Optional bounded duration, such as `30s`; negative values rejected. |
 
 For hardware-free headless use, omit `--cec-device` entirely. Hardware mpv arguments select fullscreen output and leave audio-backend/device selection to mpv; there is no CLI audio-device selector. `--temp-dir` does not relocate every temporary file: the player also owns an IPC/log directory under `/tmp`.
+
+Visible playback also works without CEC: omit `--cec-device` in an authorized X session. Channel changes still work, but cannot select the TV input, and TV standby/source-away monitoring is disabled. `/power` and `/active-source` return HTTP 503 without CEC. The supplied appliance service continues to enable CEC explicitly.
 
 ## Playback and persistence
 
@@ -322,6 +326,7 @@ HTTP is disabled unless `--listen` is supplied. There is no built-in authenticat
 
 | Method | Path | Request / result |
 | --- | --- | --- |
+| `GET` | `/status` | Local playback status JSON; does not query or infer TV state. |
 | `POST` | `/channel` | JSON `{"direction":"next"}` or `{"direction":"previous"}`. |
 | `POST` | `/volume` | JSON `{"volume":50}`; finite numeric range 0 through 100. |
 | `POST` | `/mute` | JSON `{"muted":true}` or `{"muted":false}`. |
@@ -330,6 +335,14 @@ HTTP is disabled unless `--listen` is supplied. There is no built-in authenticat
 | `POST` | `/active-source` | No body required; explicit CEC Active Source assertion. |
 
 Successful controls return HTTP 204. Channel success acknowledges accepted preview scheduling, not the delayed commit. With CEC enabled, every accepted channel request asserts Active Source immediately. Rapid requests move the pending selection and reset its two-second delay. Wrapping to the current channel does not restart an already-running player.
+
+Check playback without changing it:
+
+```bash
+curl --fail-with-body http://127.0.0.1:8080/status
+```
+
+The response contains `channel_id`, `file_path`, `playback` (`playing`, `stopped`, or `retrying`), `position_seconds` (the latest known resume offset, including the normal rewind), `pending_channel_id`, `last_error`, and `next_retry_at` (UTC timestamp or null). Empty strings mean no known value. During an active retry attempt there is no scheduled next retry, so `next_retry_at` is null. `last_error` retains the most recent playback failure even after recovery; it is not necessarily a current fault. Playing means the local player is running, not proof the TV is displaying it. Status is read through the serialized playback owner; slow synchronous operations can delay it.
 
 Volume/mute change the current mpv instance, not TV hardware volume, and require running playback. They are not persisted state fields; do not assume they survive player replacement.
 
@@ -367,4 +380,4 @@ GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off GOWORK=off \
 
 Ordinary tests include private fake-overlay helpers; opt-in real-mpv integration suites require explicit enabling and isolated media/state. They are not live-appliance acceptance commands.
 
-The Go entrypoint does not provide legacy evdev/FLIRC bindings, legacy shell hooks, or a REST playback status/start/stop API. Boot startup is provided separately by the installer/systemd unit. Complete target-device acceptance before replacing a live launcher.
+The Go entrypoint does not provide legacy evdev/FLIRC bindings, legacy shell hooks, or REST playback start/stop endpoints. Boot startup is provided separately by the installer/systemd unit. Complete target-device acceptance before replacing a live launcher.

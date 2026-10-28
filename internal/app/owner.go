@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"github.com/ccammack/easytv/internal/catalog"
 	"github.com/ccammack/easytv/internal/cec"
+	"github.com/ccammack/easytv/internal/httpapi"
 	"github.com/ccammack/easytv/internal/mpvplayer"
 	"github.com/ccammack/easytv/internal/playback"
 	"github.com/ccammack/easytv/internal/state"
+	"log"
 	"path/filepath"
 	"sync/atomic"
 	"time"
@@ -39,6 +41,7 @@ type OwnerCommand struct {
 }
 
 type OwnerResult struct {
+	Status     httpapi.PlaybackStatus
 	State      state.State
 	Running    bool
 	Generation uint64
@@ -154,7 +157,38 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 	var retryPath string
 	var retryOffset int64
 	var retryGeneration uint64
+	var nextRetryAt *time.Time
+	lastPlaybackError := ""
+	reportPlayback := func(err error) {
+		lastPlaybackError = err.Error()
+		o.report(err)
+	}
+	logPlayback := func(event string) {
+		current, _ := o.controller.MediaPaths()
+		log.Printf("playback %s: channel=%q file=%q running=%v", event, o.controller.SelectedChannelID(), current, o.controller.Running())
+	}
+	status := func() httpapi.PlaybackStatus {
+		channel := o.controller.SelectedChannelID()
+		position := o.controller.Snapshot().ChannelState[channel]
+		value := httpapi.PlaybackStatus{
+			ChannelID: channel, PositionSeconds: position.OffsetSeconds,
+			Playback: "stopped", LastError: lastPlaybackError, NextRetryAt: nextRetryAt,
+		}
+		if position.FilePath != nil {
+			value.FilePath = *position.FilePath
+		}
+		if o.controller.Running() {
+			value.Playback = "playing"
+		} else if retryC != nil || retryDone != nil {
+			value.Playback = "retrying"
+		}
+		if pending, ok := o.app.preview.Pending(); ok {
+			value.PendingChannelID = pending.ChannelID
+		}
+		return value
+	}
 	clearRetry := func() {
+		nextRetryAt = nil
 		if retryTimer != nil {
 			retryTimer.Stop()
 		}
@@ -185,6 +219,9 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 		o.app.show(filepath.Base(o.controller.SelectedChannelID()) + ": playback unavailable. Retrying...")
 		retryTimer = time.NewTimer(delay)
 		retryC = retryTimer.C
+		when := time.Now().UTC().Add(delay)
+		nextRetryAt = &when
+		logPlayback("retry scheduled for " + when.Format(time.RFC3339))
 	}
 	advance := func(generation uint64, usePrepared bool) error {
 		if usePrepared && gate.result != nil {
@@ -197,8 +234,9 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 		gate.clear()
 		retire()
 		if err := o.controller.Advance(generation); err != nil {
-			o.report(err)
+			reportPlayback(err)
 		}
+		logPlayback("advanced")
 		waitForMedia()
 		return reconcile()
 	}
@@ -220,8 +258,9 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 		result = errors.Join(result, o.app.Stop())
 	}()
 	if err := o.controller.Start(); err != nil {
-		o.report(err)
+		reportPlayback(err)
 	}
+	logPlayback("startup")
 	waitForMedia()
 	if err := reconcile(); err != nil {
 		return err
@@ -231,6 +270,7 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 		case <-ctx.Done():
 			return nil
 		case <-retryC:
+			nextRetryAt = nil
 			retryTimer = nil
 			retryC = nil
 			retryPath, retryOffset, retryGeneration = o.controller.RetryTarget()
@@ -245,13 +285,14 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 			cancelRetry()
 			cancelRetry = nil
 			if err != nil {
-				o.report(fmt.Errorf("retry %q: %w", retryPath, err))
+				reportPlayback(fmt.Errorf("retry %q: %w", retryPath, err))
 			} else {
 				if err := o.controller.AcceptRetry(retryPath, retryOffset, retryGeneration); err != nil {
-					o.report(err)
+					reportPlayback(err)
 				}
 			}
 			if o.controller.Running() {
+				logPlayback("recovered")
 				o.app.show("")
 			} else {
 				waitForMedia()
@@ -311,8 +352,9 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 				retire()
 			}
 			if err := o.app.CommitPreview(previewSequence, time.Now()); err != nil {
-				o.report(err)
+				reportPlayback(err)
 			}
+			logPlayback("channel committed")
 			waitForMedia()
 			if err := reconcile(); err != nil {
 				return err
@@ -333,7 +375,7 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 					o.app.show("")
 					failure := fmt.Errorf("mpv %s: %s", event.Kind, event.Reason)
 					if err := o.controller.Fail(event.Generation, errors.Join(failure, event.Err)); err != nil {
-						o.report(err)
+						reportPlayback(err)
 					}
 					waitForMedia()
 					if err := reconcile(); err != nil {
@@ -349,7 +391,7 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 				}
 			case "ipc-error":
 				if event.Err != nil {
-					o.report(event.Err)
+					reportPlayback(event.Err)
 				}
 				// A broken transport is not an EOF and must not silently
 				// leave an uncontrollable child or a pending restart behind.
@@ -359,6 +401,7 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 				if err := o.app.Stop(); err != nil {
 					o.report(err)
 				}
+				logPlayback("stopped after IPC loss")
 			case "request-error":
 				if event.Err != nil {
 					o.report(event.Err)
@@ -401,6 +444,10 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 			case "start":
 				clearRetry()
 				err = o.controller.Start()
+				if err != nil {
+					reportPlayback(err)
+				}
+				logPlayback("start requested")
 				waitForMedia()
 			case "stop":
 				clearRetry()
@@ -408,6 +455,7 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 				clearTimer()
 				retire()
 				err = o.app.Stop()
+				logPlayback("stop requested")
 			case "channel":
 				var ticket playback.PreviewTicket
 				ticket, err = o.app.RequestChannel(command.Direction, time.Now())
@@ -422,6 +470,7 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 				reason, err = o.app.HandleCEC(command.Message, command.Adapter)
 				if reason != "" {
 					clearRetry()
+					logPlayback("CEC stop: " + reason)
 				}
 				if !o.controller.Running() {
 					gate.clear()
@@ -432,7 +481,7 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 				err = fmt.Errorf("unknown owner command %q", command.Kind)
 			}
 			syncErr := reconcile()
-			request.reply <- OwnerResult{State: o.controller.Snapshot(), Running: o.controller.Running(), Generation: o.controller.Generation(), Reason: reason, Err: errors.Join(err, syncErr)}
+			request.reply <- OwnerResult{Status: status(), State: o.controller.Snapshot(), Running: o.controller.Running(), Generation: o.controller.Generation(), Reason: reason, Err: errors.Join(err, syncErr)}
 			if syncErr != nil {
 				return syncErr
 			}

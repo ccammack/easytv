@@ -1,8 +1,20 @@
 package app
 
-import "context"
+import (
+	"context"
+
+	"github.com/ccammack/easytv/internal/httpapi"
+)
 
 type ownerHTTPControls struct{ owner *Owner }
+
+func (c ownerHTTPControls) Status(ctx context.Context) (httpapi.PlaybackStatus, error) {
+	result, err := c.owner.Submit(ctx, OwnerCommand{Kind: "status"})
+	if err != nil {
+		return httpapi.PlaybackStatus{}, err
+	}
+	return result.Status, result.Err
+}
 
 func (c ownerHTTPControls) submit(ctx context.Context, command OwnerCommand) error {
 	result, err := c.owner.Submit(ctx, command)

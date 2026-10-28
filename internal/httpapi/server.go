@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -26,6 +25,7 @@ func NewServer(backend Backend) *Server {
 }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /status", s.statusHandler)
 	mux.HandleFunc("POST /channel", s.channelHandler)
 	mux.HandleFunc("POST /volume", s.volumeHandler)
 	mux.HandleFunc("POST /mute", s.muteHandler)
@@ -38,7 +38,7 @@ func (s *Server) powerHandler(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		State string `json:"state"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeControl(w, r, &body); err != nil {
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}

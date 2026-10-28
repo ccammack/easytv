@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"github.com/ccammack/easytv/internal/catalog"
 	"github.com/ccammack/easytv/internal/httpapi"
 	"github.com/ccammack/easytv/internal/mpvplayer"
@@ -70,6 +71,25 @@ func TestRealHTTPPlaybackControlsUseOwner(t *testing.T) {
 		}
 	}()
 	client := &http.Client{Timeout: 3 * time.Second}
+	readStatus := func() httpapi.PlaybackStatus {
+		t.Helper()
+		response, err := client.Get("http://" + listener.Addr().String() + "/status")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("status HTTP=%d", response.StatusCode)
+		}
+		var status httpapi.PlaybackStatus
+		if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+			t.Fatal(err)
+		}
+		return status
+	}
+	if status := readStatus(); status.Playback != "playing" || status.ChannelID != "/a" || status.FilePath != first || status.LastError != "" || status.NextRetryAt != nil {
+		t.Fatalf("playing status=%+v", status)
+	}
 	post := func(path, body string) {
 		t.Helper()
 		response, err := client.Post("http://"+listener.Addr().String()+path, "application/json", strings.NewReader(body))
@@ -94,6 +114,9 @@ func TestRealHTTPPlaybackControlsUseOwner(t *testing.T) {
 		t.Fatalf("mute=%v err=%v", value, err)
 	}
 	post("/channel", `{"direction":"next"}`)
+	if status := readStatus(); status.PendingChannelID != "/b" {
+		t.Fatalf("pending channel status=%+v", status)
+	}
 	if claims.Load() != 1 {
 		t.Fatal("HTTP channel request did not claim AS before replying")
 	}
@@ -111,5 +134,15 @@ func TestRealHTTPPlaybackControlsUseOwner(t *testing.T) {
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
-	t.Log("volume/mute reached real mpv through owner; channel REST claimed AS immediately and committed preview once")
+	if status := readStatus(); status.Playback != "playing" || status.ChannelID != "/b" ||
+		status.FilePath != second || status.PendingChannelID != "" {
+		t.Fatalf("committed status=%+v", status)
+	}
+	if result, err := owner.Submit(ctx, OwnerCommand{Kind: "stop"}); err != nil || result.Err != nil {
+		t.Fatalf("stop=%+v err=%v", result, err)
+	}
+	if status := readStatus(); status.Playback != "stopped" || status.NextRetryAt != nil {
+		t.Fatalf("stopped status=%+v", status)
+	}
+	t.Log("volume/mute reached real mpv; channel REST claimed AS and committed; status reflected playing, pending and stopped states")
 }
