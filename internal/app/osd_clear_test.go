@@ -10,7 +10,7 @@ func TestStopAndSourceAwayClearPreviewOverlay(t *testing.T) {
 	for _, scenario := range []string{"stop", "source away", "standby", "save failure"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := setup(t)
-			ticket, err := f.app.RequestChannel(1, time.Unix(100, 0))
+			ticket, err := f.request(1, time.Unix(100, 0))
 			if err != nil {
 				t.Fatal(err)
 			}

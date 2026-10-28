@@ -138,9 +138,7 @@ func TestRealHTTPPlaybackControlsUseOwner(t *testing.T) {
 	if status := readStatus(); status.PendingChannelID != "/b" {
 		t.Fatalf("pending channel status=%+v", status)
 	}
-	if claims.Load() != 1 {
-		t.Fatal("HTTP channel request did not claim AS before replying")
-	}
+	waitChannelClaims(t, &claims, 1)
 	for {
 		result, err := owner.Submit(ctx, OwnerCommand{Kind: "status"})
 		if err != nil || result.Err != nil {

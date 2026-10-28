@@ -17,6 +17,7 @@ import (
 
 // RuntimeConfig requires explicit storage paths and injected side effects.
 // Hardware opening and executable defaults belong to the eventual entrypoint.
+// Show and Report must support concurrent calls from input and playback work.
 type RuntimeConfig struct {
 	HTTPListener net.Listener
 	httpServer   *httpapi.Server

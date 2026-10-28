@@ -31,7 +31,7 @@ func TestRealMediaRecoveryKeepsChannelAndCancelsOnUserOrCEC(t *testing.T) {
 			ownerWAV(t, other)
 			p := mpvplayer.New(mpvplayer.Config{
 				OutputArgs:     []string{"--ao=null", "--vo=null", "--loop-file=inf"},
-				StartupTimeout: time.Second,
+				StartupTimeout: 3 * time.Second,
 			})
 			statePath := filepath.Join(t.TempDir(), "state.json")
 			channels := []catalog.Channel{
@@ -76,7 +76,9 @@ func TestRealMediaRecoveryKeepsChannelAndCancelsOnUserOrCEC(t *testing.T) {
 					t.Error("player retained after shutdown")
 				}
 			}()
-			rescanSubmit(t, owner, ctx, OwnerCommand{Kind: "status"})
+			if initial := rescanSubmit(t, owner, ctx, OwnerCommand{Kind: "status"}); !initial.Running {
+				t.Fatalf("initial playback did not start: %+v", initial.Status)
+			}
 			// The IPC client is thread-safe; capture it before disconnecting.
 			ipc := p.Client()
 			if err := os.Rename(current, backup); err != nil {

@@ -2,14 +2,18 @@ package app
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/ccammack/easytv/internal/playback"
 )
 
-// Coordinator is called by one serialized application owner, never directly
-// from concurrent HTTP handlers. Timer and CEC receivers enqueue work to it.
+// Controller operations have one serialized owner. Preview state has its own
+// lock so feedback can continue during CEC transmission and player startup.
 type Coordinator struct {
+	mu         sync.Mutex
+	selected   string
+	epoch      uint64
 	controller *playback.Controller
 	preview    *playback.Preview
 	claim      playback.ClaimSource
@@ -20,43 +24,65 @@ func New(controller *playback.Controller, preview *playback.Preview, claim playb
 	if controller == nil || preview == nil || claim == nil || show == nil {
 		return nil, fmt.Errorf("controller, preview, AS, and OSD callbacks required")
 	}
-	return &Coordinator{controller: controller, preview: preview, claim: claim, show: show}, nil
+	return &Coordinator{controller: controller, preview: preview, claim: claim, show: show, selected: controller.SelectedChannelID()}, nil
 }
 
-// RequestChannel asserts AS immediately for each accepted direction request.
-// The returned ticket is scheduled by the owner, not by a goroutine here.
-func (a *Coordinator) RequestChannel(direction int, now time.Time) (playback.PreviewTicket, error) {
-	if direction != 1 && direction != -1 {
-		return playback.PreviewTicket{}, fmt.Errorf("direction must be +1 or -1")
-	}
-	// Validate the base against the preview's channel list before any CEC I/O.
-	// A copy permits validation without changing the live preview on AS failure.
-	trial := *a.preview
-	ticket, err := trial.Request(a.controller.SelectedChannelID(), direction, now)
-	if err != nil {
-		return playback.PreviewTicket{}, err
-	}
-	if err := a.claim(); err != nil {
-		return playback.PreviewTicket{}, fmt.Errorf("claim active source: %w", err)
-	}
-	*a.preview = trial
-	a.show(ticket.ChannelID)
-	return ticket, nil
-}
-
-// CommitPreview never reasserts AS: it was already requested by RequestChannel.
+// CommitPreview never reasserts AS: the owner waits for the queued claim first.
 // Stop cancels the ticket, preventing a queued timer from restarting playback
 // or stealing the TV input after a source-away/standby observation.
 func (a *Coordinator) CommitPreview(sequence uint64, now time.Time) error {
+	a.mu.Lock()
 	id, ok := a.preview.Commit(sequence, now)
+	if ok {
+		a.selected = id
+	}
+	a.mu.Unlock()
 	if !ok {
 		return nil
 	}
-	return a.controller.SelectChannel(id, func() error { return nil })
+	err := a.controller.SelectChannel(id, func() error { return nil })
+	a.mu.Lock()
+	a.selected = a.controller.SelectedChannelID()
+	a.mu.Unlock()
+	return err
 }
 func (a *Coordinator) Stop() error {
-	a.preview.Cancel()
-	// Empty text clears the owned overlay, including on source loss/shutdown.
-	a.show("")
+	a.cancelPreview()
 	return a.controller.Stop()
+}
+
+func (a *Coordinator) pending() (playback.PreviewTicket, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.preview.Pending()
+}
+
+func (a *Coordinator) cancelPreview() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.epoch++
+	a.preview.Cancel()
+	a.show("")
+}
+
+func (a *Coordinator) replacePreview() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	preview, err := playback.NewPreview(a.controller.ChannelIDs(), a.preview.Delay())
+	if err != nil {
+		return err
+	}
+	a.preview = preview
+	a.selected = a.controller.SelectedChannelID()
+	a.epoch++
+	a.show("")
+	return nil
+}
+
+func (a *Coordinator) showIfNoPreview(text string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, ok := a.preview.Pending(); !ok {
+		a.show(text)
+	}
 }

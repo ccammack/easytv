@@ -13,13 +13,15 @@ import (
 type player struct {
 	starts, stops int
 	path          string
+	stopErr       error
 }
 
 func (p *player) Start(path string, _ int64, _ uint64) error { p.starts++; p.path = path; return nil }
-func (p *player) Stop() error                                { p.stops++; return nil }
+func (p *player) Stop() error                                { p.stops++; return p.stopErr }
 
 type fixture struct {
 	app           *Coordinator
+	owner         *Owner
 	controller    *playback.Controller
 	preview       *playback.Preview
 	player        *player
@@ -54,16 +56,29 @@ func setup(t *testing.T) *fixture {
 		t.Fatal("startup was not persisted")
 	}
 	f.saves = 0
+	f.owner = inputOwner(t, f.app)
 	return f
 }
-func TestRapidRequestsClaimImmediatelyButCommitOnce(t *testing.T) {
+
+func (f *fixture) request(direction int, now time.Time) (playback.PreviewTicket, error) {
+	if err := f.owner.queueChannel(direction, now); err != nil {
+		return playback.PreviewTicket{}, err
+	}
+	claim := <-f.owner.claims
+	claim.err = f.app.claim()
+	f.owner.finishClaim(claim)
+	return claim.ticket, claim.err
+}
+
+func TestRapidRequestsClaimInOrderButCommitOnce(t *testing.T) {
 	f := setup(t)
 	now := time.Unix(100, 0)
-	first, err := f.app.RequestChannel(1, now)
+	first, err := f.request(1, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := f.app.RequestChannel(1, now.Add(time.Second))
+
+	second, err := f.request(1, now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,9 +98,29 @@ func TestRapidRequestsClaimImmediatelyButCommitOnce(t *testing.T) {
 		t.Fatalf("fixture=%+v player=%+v", f, f.player)
 	}
 }
+func TestFailedSwitchReconcilesPreviewBase(t *testing.T) {
+	f := setup(t)
+	ticket, err := f.request(1, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	failure := errors.New("player stop failed")
+	f.player.stopErr = failure
+	if err := f.app.CommitPreview(ticket.Sequence, ticket.Due); !errors.Is(err, failure) {
+		t.Fatalf("commit error=%v", err)
+	}
+	if f.controller.SelectedChannelID() != "a" {
+		t.Fatal("failed stop changed actual channel")
+	}
+	next, err := f.request(1, time.Now())
+	if err != nil || next.ChannelID != "b" {
+		t.Fatalf("next preview=%+v error=%v; wanted b relative to actual a", next, err)
+	}
+}
+
 func TestStopCancelsQueuedPreview(t *testing.T) {
 	f := setup(t)
-	ticket, err := f.app.RequestChannel(1, time.Unix(100, 0))
+	ticket, err := f.request(1, time.Unix(100, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +142,7 @@ func TestStopCancelsQueuedPreview(t *testing.T) {
 }
 func TestStopCancelsEvenWhenSaveFails(t *testing.T) {
 	f := setup(t)
-	ticket, err := f.app.RequestChannel(1, time.Unix(100, 0))
+	ticket, err := f.request(1, time.Unix(100, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,26 +158,9 @@ func TestStopCancelsEvenWhenSaveFails(t *testing.T) {
 		t.Fatal("failed save allowed restart")
 	}
 }
-func TestClaimFailurePreservesPreviousPreview(t *testing.T) {
-	f := setup(t)
-	now := time.Unix(100, 0)
-	first, err := f.app.RequestChannel(1, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	failure := errors.New("CEC failed")
-	f.claimErr = failure
-	if _, err := f.app.RequestChannel(1, now.Add(time.Second)); !errors.Is(err, failure) {
-		t.Fatal(err)
-	}
-	got, ok := f.preview.Pending()
-	if !ok || got != first || len(f.shown) != 1 {
-		t.Fatal("failed AS changed preview")
-	}
-}
 func TestInvalidDirectionDoesNotClaim(t *testing.T) {
 	f := setup(t)
-	if _, err := f.app.RequestChannel(0, time.Unix(100, 0)); err == nil || f.claims != 0 {
+	if _, err := f.request(0, time.Unix(100, 0)); err == nil || f.claims != 0 {
 		t.Fatal("invalid request performed CEC")
 	}
 }
@@ -152,7 +170,7 @@ func TestWrappedCurrentDoesNotRestartUntilStopped(t *testing.T) {
 	var ticket playback.PreviewTicket
 	for i := 0; i < 3; i++ {
 		var err error
-		ticket, err = f.app.RequestChannel(1, now)
+		ticket, err = f.request(1, now)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -168,7 +186,7 @@ func TestWrappedCurrentDoesNotRestartUntilStopped(t *testing.T) {
 	}
 	for i := 0; i < 3; i++ {
 		var err error
-		ticket, err = f.app.RequestChannel(1, now)
+		ticket, err = f.request(1, now)
 		if err != nil {
 			t.Fatal(err)
 		}

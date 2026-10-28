@@ -39,7 +39,7 @@ func NewPreview(ids []string, delay time.Duration) (*Preview, error) {
 }
 
 // Request moves relative to the pending preview, or current if none exists.
-// Call this only after the application's AS request succeeds. No I/O occurs.
+// The application separately gates commits on AS completion. No I/O occurs.
 func (p *Preview) Request(current string, direction int, now time.Time) (PreviewTicket, error) {
 	if direction != 1 && direction != -1 {
 		return PreviewTicket{}, fmt.Errorf("direction must be +1 or -1")

@@ -69,9 +69,7 @@ func TestRealSupervisedCECRuntimeShutdown(t *testing.T) {
 			if err != nil || result.Err != nil {
 				t.Fatalf("channel=%+v err=%v", result, err)
 			}
-			if backend.claims.Load() != 1 {
-				t.Fatal("runtime did not route AS through service")
-			}
+			waitChannelClaims(t, &backend.claims, 1)
 			if adapterFails {
 				backend.failed.Store(true)
 			} else {

@@ -337,7 +337,13 @@ HTTP is disabled unless `--listen` is supplied. There is no built-in authenticat
 | `POST` | `/power` | JSON `{"state":"on"}` or `{"state":"off"}`; requires CEC. |
 | `POST` | `/active-source` | No body required; explicit CEC Active Source assertion. |
 
-Successful controls return HTTP 204. Channel success acknowledges accepted preview scheduling, not the delayed commit. With CEC enabled, every accepted channel request asserts Active Source immediately. Rapid requests move the pending selection and reset its two-second delay. Wrapping to the current channel does not restart an already-running player.
+Successful controls return HTTP 204. Channel success acknowledges queued work and channel-name feedback submission, not CEC transmission or the delayed playback commit. Rapid requests move the pending selection and reset its two-second delay. Wrapping to the current channel does not restart an already-running player.
+
+Channel-name feedback runs independently of CEC transmission and player startup. One bounded worker sends Active Source claims in request order; queue overflow is an explicit HTTP error and leaves the preview unchanged. Playback commits only after the latest preview's claim succeeds and its two-second delay has elapsed. A failed latest claim clears that preview and is reported asynchronously in the application log and `/status`'s `last_error`; a failed older claim is logged but cannot clear newer feedback. Stop, standby/source-away, rescan, and shutdown invalidate queued claims as well as previews; a transmission already in progress cannot be recalled. CEC receive polls are bounded to 50 ms. Input switching, overlay rendering and media startup can still add time, and an overlay cannot be seen while the TV is displaying another input.
+
+Normal operation logs playback transitions and errors; remote key dispatch and HTTP acceptance timings are debug-level diagnostics. Use the remote's `--test` mode below for detailed channel input logging and direct visual feedback. A playback-commit log is not a count of button presses, because successive requests reset the preview timer.
+
+Stop and CEC policy decisions take effect when the playback owner accepts and processes them; a request canceled before acceptance does not alter pending feedback. A synchronous player operation already underway can delay that processing. Channel feedback remains independently responsive during those operations.
 
 Check playback without changing it:
 
@@ -417,6 +423,33 @@ The invoking user needs read permission on the chosen input device. Configure na
 
 Only key-down events are handled; releases and auto-repeat are ignored. The bridge sends REST requests only for channel changes; power, volume, and mute stubs send nothing to avoid doubling the remote's direct TV controls. The mpv volume/mute REST endpoints remain available to other clients. HTTP failures/timeouts are logged; requests are not automatically retried because repeating a channel step could change the intended selection. Ctrl-C stops only the bridge, not EasyTV. Keep the unauthenticated API on loopback or use a separately secured connection.
 
+### Test remote input without REST
+
+Run the same Elixir script with `--test` to log channel key-down/repeat/release events and show numbered `REMOTE TEST` overlays directly through asynchronously launched `aosd_cat` ports. Each channel key-down replaces the previous overlay; repeats/releases are logged but do not advance the count. No REST requests are sent. Test mode exclusively grabs the selected input devices so the normal remote service cannot also act on these presses; exiting releases them. No Go service changes or restarts are needed.
+
+```bash
+sudo install -m 0755 scripts/easytv-remote.exs \
+  /usr/local/lib/easytv/easytv-remote.exs
+
+# Use an accessible working directory for Mix.install as the easytv user.
+cd /tmp
+sudo -u easytv env HOME=/var/lib/easytv DISPLAY=:0 \
+  XAUTHORITY=/run/easytv/Xauthority \
+  /usr/local/lib/easytv/easytv-remote.exs --test /dev/input/by-id/YOUR_REMOTE-event-kbd
+```
+
+Run the install command from the project root before changing directory. This updates only the shipped copy, not the service's editable script. Use the actual device path and the running X display's authority file. `aosd_cat` and access to that display are required. Stop with Ctrl-C (then `a` if Erlang presents its break menu). The flag is also available in the installed editable script after explicitly updating that copy; reinstall preserves it.
+
+For testing through systemd, add `DISPLAY=:0` and `XAUTHORITY=/run/easytv/Xauthority` environment entries and override `ExecStart` to run the installed script with `--test` and the selected device. Keep `WorkingDirectory=/var/lib/easytv`. Reload systemd and restart only `easytv-remote.service`. Test mode persists across restarts until that override is removed. If using a dedicated `test.conf` drop-in, restore normal REST operation with:
+
+```bash
+sudo rm /etc/systemd/system/easytv-remote.service.d/test.conf
+sudo systemctl daemon-reload
+sudo systemctl restart easytv-remote.service
+```
+
+Remove only the test-specific override, not other local settings. Follow input and HTTP logs with `journalctl -u easytv-remote.service -f`.
+
 Bridge tests do not open input devices or download dependencies:
 
 ```bash
@@ -427,7 +460,9 @@ elixir tests/easytv_remote_test.exs
 
 The internal CEC service owns adapter access exclusively and reads current kernel logical/physical addresses for commands and received-observation evaluation. It passes each received packet with its current adapter metadata directly to the playback owner. Bus monitoring remains active even when HTTP is disabled; it does not require public event streams or a separate CEC server.
 
-Applicable observations of another Active Source, TV-reported standby/transition to standby, or TV standby addressed to the appliance/broadcast stop playback. Malformed, unrelated, or insufficient-identity observations do not establish source loss. Routing-message policy is not implemented as a substitute. There is no repeated input-seizing loop or inferred TV-state `/status` endpoint.
+Applicable observations of another Active Source, TV-reported standby/transition to standby, or TV standby addressed to the appliance/broadcast stop playback. Malformed, unrelated, or insufficient-identity observations do not establish source loss. A valid TV-originated broadcast `SET_STREAM_PATH` matching the adapter's current physical address resumes the selected channel from saved playback state. Duplicate selections do not restart an already-running player. This resumes local playback without sending Active Source or power commands; other routing messages do not trigger resume. There is no repeated input-seizing loop or inferred TV-state `/status` endpoint.
+
+Turning the TV back on resumes playback automatically only if the TV explicitly selects the Pi with `SET_STREAM_PATH`. Power-on reports alone do not resume playback or seize the input from another device. TVs that do not send this selection message still require a channel-button press to claim the Pi input and resume; switching to another input first is not required. Unrelated CEC traffic during wake-up must not cancel that pending channel request.
 
 HTTP exposes only the CEC actions `/power` and `/active-source`, alongside playback controls. The former `/adapter`, `/events`, and `/events.ndjson` endpoints and metadata-only `--device-name` option have been removed. Adapter information and received packets remain internal. Kernel adapter diagnostics/loss notices are logged; see [Check startup and playback logs](#check-startup-and-playback-logs).
 

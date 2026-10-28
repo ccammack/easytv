@@ -14,7 +14,7 @@ func TestPollEmptyEventQueueUsesBoundedReceive(t *testing.T) {
 	b.eventReadyFn = func() (bool, error) { return false, nil }
 	received := false
 	b.ioctlFn = func(_ int, cmd uintptr, arg unsafe.Pointer) error {
-		if cmd != cecReceive() || (*cecMsg)(arg).Timeout != 500 {
+		if cmd != cecReceive() || (*cecMsg)(arg).Timeout != 50 {
 			t.Fatal("expected bounded receive")
 		}
 		received = true

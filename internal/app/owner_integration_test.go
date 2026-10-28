@@ -113,9 +113,7 @@ func TestRealOwnerSerializesEOFPreviewAndStop(t *testing.T) {
 	}
 	t.Log("owner advanced first to second file on real EOF")
 	submit(OwnerCommand{Kind: "channel", Direction: 1})
-	if claims.Load() != 1 {
-		t.Fatal("channel request did not claim immediately")
-	}
+	waitChannelClaims(t, &claims, 1)
 	for {
 		result := submit(OwnerCommand{Kind: "status"})
 		if result.State.CurrentChannelID != nil && *result.State.CurrentChannelID == "/b" {
@@ -129,6 +127,7 @@ func TestRealOwnerSerializesEOFPreviewAndStop(t *testing.T) {
 	}
 	t.Log("owner committed preview and installed replacement session")
 	submit(OwnerCommand{Kind: "channel", Direction: 1})
+	waitChannelClaims(t, &claims, 2)
 	stopped := submit(OwnerCommand{Kind: "stop"})
 	if stopped.Running {
 		t.Fatal("stop left running playback")

@@ -7,16 +7,46 @@ import (
 )
 
 // HandleCEC applies playback policy to a received frame. The serialized owner
-// supplies current adapter metadata. It never transmits, restarts playback, or
-// rewrites the received packet. A nonempty reason records a stop decision, not
-// a claim that an observed command is confirmed TV state.
+// supplies current adapter metadata. It never transmits or rewrites packets.
+// A TV selection of our current physical path resumes local playback.
 func (a *Coordinator) HandleCEC(message cec.ReceivedMessage, self cec.AdapterInfo) (string, error) {
-	if message.ValidationError != "" {
+	if cecSelectsPi(message, self) {
+		return "tv_selected_pi", a.controller.Start()
+	}
+	reason := cecStopReason(message, self)
+	if reason == "" {
 		return "", nil
+	}
+	return reason, a.Stop()
+}
+
+func cecSelectsPi(message cec.ReceivedMessage, self cec.AdapterInfo) bool {
+	if message.ValidationError != "" || message.Length != 4 || self.PhysicalAddress == nil {
+		return false
+	}
+	raw, err := hex.DecodeString(message.Raw)
+	if err != nil || len(raw) != 4 || raw[0] != 0x0f || raw[1] != 0x86 {
+		return false
+	}
+	physical := uint16(raw[2])<<8 | uint16(raw[3])
+	if physical == 0 || !validPhysical(physical) || physicalText(physical) != *self.PhysicalAddress {
+		return false
+	}
+	for _, address := range self.LogicalAddresses {
+		if address > 0 && address < 15 {
+			return true
+		}
+	}
+	return false
+}
+
+func cecStopReason(message cec.ReceivedMessage, self cec.AdapterInfo) string {
+	if message.ValidationError != "" {
+		return ""
 	}
 	raw, err := hex.DecodeString(message.Raw)
 	if err != nil || len(raw) < 2 || len(raw) > 16 || uint32(len(raw)) != message.Length {
-		return "", nil
+		return ""
 	}
 	initiator, destination := int(raw[0]>>4), int(raw[0]&15)
 	own := func(id int) bool {
@@ -32,7 +62,7 @@ func (a *Coordinator) HandleCEC(message cec.ReceivedMessage, self cec.AdapterInf
 	switch raw[1] {
 	case 0x82: // ACTIVE_SOURCE is a broadcast with a physical address.
 		if len(raw) != 4 || destination != 15 || initiator == 15 || own(initiator) {
-			return "", nil
+			return ""
 		}
 		// Unknown local identity must not be treated as proof of another source.
 		knownLogical := false
@@ -42,15 +72,15 @@ func (a *Coordinator) HandleCEC(message cec.ReceivedMessage, self cec.AdapterInf
 			}
 		}
 		if !knownLogical || self.PhysicalAddress == nil {
-			return "", nil
+			return ""
 		}
 		physical := uint16(raw[2])<<8 | uint16(raw[3])
 		if !validPhysical(physical) {
-			return "", nil
+			return ""
 		}
 		text := physicalText(physical)
 		if text == *self.PhysicalAddress {
-			return "", nil
+			return ""
 		}
 		reason = "other_active_source"
 	case 0x90: // REPORT_POWER_STATUS from the TV, not another appliance.
@@ -67,10 +97,7 @@ func (a *Coordinator) HandleCEC(message cec.ReceivedMessage, self cec.AdapterInf
 			reason = "tv_standby_command"
 		}
 	}
-	if reason == "" {
-		return "", nil
-	}
-	return reason, a.Stop()
+	return reason
 }
 
 func validPhysical(address uint16) bool {

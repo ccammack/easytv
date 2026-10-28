@@ -28,7 +28,7 @@ func TestCECStopDecisionsCancelPreview(t *testing.T) {
 	for raw, want := range cases {
 		t.Run(raw, func(t *testing.T) {
 			f := setup(t)
-			ticket, err := f.app.RequestChannel(1, time.Unix(100, 0))
+			ticket, err := f.request(1, time.Unix(100, 0))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -64,7 +64,7 @@ func TestCECUnrelatedOwnAndMalformedFramesDoNothing(t *testing.T) {
 		"489001", "4f36", // not the TV
 		"009001", "0036", // not addressed to us or broadcast
 		"089000", "089002", "0890ff", // not TV standby
-		"0f861000", "0f862000", // routing policy not implemented here
+		"0f862000", // selection of another input does not resume us
 		"0f82", "0890", "0f3600", "zz", "", "04",
 	}
 	for _, raw := range frames {
@@ -75,6 +75,44 @@ func TestCECUnrelatedOwnAndMalformedFramesDoNothing(t *testing.T) {
 				t.Fatalf("reason=%q err=%v", reason, err)
 			}
 		})
+	}
+}
+
+func TestTVSelectionResumesWithoutClaimOrRestart(t *testing.T) {
+	f := setup(t)
+	if _, err := f.app.HandleCEC(frame("0f36"), adapter()); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{"089000", "0f862000", "4f861000", "08861000", "0f86100000"} {
+		reason, err := f.app.HandleCEC(frame(raw), adapter())
+		if err != nil || reason != "" || f.controller.Running() {
+			t.Fatalf("unrelated frame %s resumed: reason=%q err=%v", raw, reason, err)
+		}
+	}
+	for range 2 {
+		reason, err := f.app.HandleCEC(frame("0f861000"), adapter())
+		if err != nil || reason != "tv_selected_pi" || !f.controller.Running() {
+			t.Fatalf("TV selection did not resume: reason=%q err=%v", reason, err)
+		}
+	}
+	if f.player.starts != 2 || f.claims != 0 {
+		t.Fatal("duplicate selection restarted playback or transmitted AS")
+	}
+}
+
+func TestTVSelectionRequiresCurrentValidIdentity(t *testing.T) {
+	for _, self := range []cec.AdapterInfo{{}, metadata(15, "1.0.0.0"), metadata(8, "2.0.0.0")} {
+		if cecSelectsPi(frame("0f861000"), self) {
+			t.Fatal("unknown or different identity accepted")
+		}
+	}
+	packet := frame("0f861000")
+	packet.ValidationError = "invalid"
+	if cecSelectsPi(packet, adapter()) || cecSelectsPi(frame("0f860000"), metadata(8, "0.0.0.0")) {
+		t.Fatal("invalid TV selection accepted")
+	}
+	if !cecSelectsPi(frame("0f863000"), metadata(11, "3.0.0.0")) {
+		t.Fatal("updated adapter identity ignored")
 	}
 }
 func TestCECRequiresValidFrameAndKnownSourceIdentity(t *testing.T) {

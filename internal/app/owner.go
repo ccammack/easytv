@@ -18,18 +18,25 @@ import (
 )
 
 // Owner serializes application commands, preview commits and player events.
-// After Run begins, its controller, coordinator and player belong only to it.
+// After Run begins, its controller and player belong only to it. Channel
+// feedback is independently serialized by the coordinator's preview lock.
 // Image timers and preparation results are handled in the same owner loop.
 type Owner struct {
-	controller *playback.Controller
-	app        *Coordinator
-	player     *mpvplayer.Player
-	report     func(error)
-	requests   chan ownerRequest
-	done       chan struct{}
-	started    atomic.Bool
-	scan       func(context.Context) ([]catalog.Channel, error)
-	retryDelay time.Duration
+	controller   *playback.Controller
+	app          *Coordinator
+	player       *mpvplayer.Player
+	report       func(error)
+	requests     chan ownerRequest
+	done         chan struct{}
+	started      atomic.Bool
+	scan         func(context.Context) ([]catalog.Channel, error)
+	retryDelay   time.Duration
+	claims       chan channelClaim
+	claimResults chan channelClaim
+	claimsDone   chan struct{}
+	inputReady   chan struct{}
+	accepting    bool // protected by app.mu
+	inputWake    chan struct{}
 }
 
 type OwnerCommand struct {
@@ -68,12 +75,39 @@ func NewOwner(c *playback.Controller, a *Coordinator, p *mpvplayer.Player, repor
 	if a.controller != c {
 		return nil, errors.New("coordinator/controller mismatch")
 	}
-	return &Owner{controller: c, app: a, player: p, report: report, requests: make(chan ownerRequest), done: make(chan struct{})}, nil
+	return &Owner{controller: c, app: a, player: p, report: report, requests: make(chan ownerRequest), done: make(chan struct{}),
+		claims: make(chan channelClaim, 64), claimResults: make(chan channelClaim, 64), claimsDone: make(chan struct{}), inputReady: make(chan struct{}), inputWake: make(chan struct{}, 1)}, nil
 }
 
-// Submit waits for an owner response. Cancellation after acceptance does not
-// roll back the command. A buffered reply lets the owner finish regardless.
+// Submit waits for an owner response except for channel feedback, which is
+// queued independently. Cancellation after acceptance does not roll back work.
 func (o *Owner) Submit(ctx context.Context, command OwnerCommand) (OwnerResult, error) {
+	if err := ctx.Err(); err != nil {
+		return OwnerResult{}, err
+	}
+	select {
+	case <-o.done:
+		return OwnerResult{}, errors.New("owner stopped")
+	default:
+	}
+	if command.Kind == "channel" {
+		select {
+		case <-ctx.Done():
+			return OwnerResult{}, ctx.Err()
+		case <-o.done:
+			return OwnerResult{}, errors.New("owner stopped")
+		case <-o.inputReady:
+		}
+		if err := ctx.Err(); err != nil {
+			return OwnerResult{}, err
+		}
+		select {
+		case <-o.done:
+			return OwnerResult{}, errors.New("owner stopped")
+		default:
+		}
+		return OwnerResult{Err: o.queueChannel(command.Direction, time.Now())}, nil
+	}
 	request := ownerRequest{command: command, reply: make(chan OwnerResult, 1)}
 	select {
 	case <-ctx.Done():
@@ -102,6 +136,19 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 		return errors.New("owner can run only once")
 	}
 	defer close(o.done)
+	claimCtx, cancelClaims := context.WithCancel(ctx)
+	go o.runClaims(claimCtx)
+	o.app.mu.Lock()
+	o.accepting = true
+	o.app.mu.Unlock()
+	close(o.inputReady)
+	defer func() {
+		o.app.mu.Lock()
+		o.accepting = false
+		o.app.mu.Unlock()
+		cancelClaims()
+		<-o.claimsDone
+	}()
 	var scanDone <-chan scanResult
 	var scanReply chan OwnerResult
 	scanCtx, cancelScan := context.WithCancel(ctx)
@@ -183,7 +230,7 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 		} else if retryC != nil || retryDone != nil {
 			value.Playback = "retrying"
 		}
-		if pending, ok := o.app.preview.Pending(); ok {
+		if pending, ok := o.app.pending(); ok {
 			value.PendingChannelID = pending.ChannelID
 		}
 		return value
@@ -217,7 +264,7 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 		if delay <= 0 {
 			delay = 10 * time.Second
 		}
-		o.app.show(filepath.Base(o.controller.SelectedChannelID()) + ": playback unavailable. Retrying...")
+		o.app.showIfNoPreview(filepath.Base(o.controller.SelectedChannelID()) + ": playback unavailable. Retrying...")
 		retryTimer = time.NewTimer(delay)
 		retryC = retryTimer.C
 		when := time.Now().UTC().Add(delay)
@@ -252,6 +299,9 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 		previewC = nil
 	}
 	defer func() {
+		o.app.mu.Lock()
+		o.accepting = false
+		o.app.mu.Unlock()
 		clearRetry()
 		clearTimer()
 		gate.clear()
@@ -294,7 +344,7 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 			}
 			if o.controller.Running() {
 				logPlayback("recovered")
-				o.app.show("")
+				o.app.showIfNoPreview("")
 			} else {
 				waitForMedia()
 			}
@@ -309,13 +359,9 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 				gate.clear()
 				clearTimer()
 				retire()
-				o.app.preview.Cancel()
-				o.app.show("")
+				o.app.cancelPreview()
 				err = o.controller.ReplaceChannels(scanned.channels)
-				preview, previewErr := playback.NewPreview(o.controller.ChannelIDs(), o.app.preview.Delay())
-				if previewErr == nil {
-					o.app.preview = preview
-				}
+				previewErr := o.app.replacePreview()
 				err = errors.Join(err, previewErr)
 			}
 			if ctx.Err() != nil {
@@ -345,10 +391,33 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 					return err
 				}
 			}
-		case <-previewC:
-			pending, ok := o.app.preview.Pending()
+		case <-o.inputWake:
+			clearRetry()
+			pending, ok := o.app.pending()
+			if !ok || pending.Sequence != previewSequence {
+				clearTimer()
+			}
+		case claim := <-o.claimResults:
+			pending, ok := o.finishClaim(claim)
+			if !ok {
+				continue
+			}
+			clearRetry()
 			clearTimer()
-			if ok && (pending.ChannelID != o.controller.SelectedChannelID() || !o.controller.Running()) {
+			if claim.err != nil {
+				lastPlaybackError = claim.err.Error()
+				continue
+			}
+			previewSequence = pending.Sequence
+			previewTimer = time.NewTimer(time.Until(pending.Due))
+			previewC = previewTimer.C
+		case <-previewC:
+			pending, ok := o.app.pending()
+			clearTimer()
+			if !ok || pending.Sequence != previewSequence {
+				continue
+			}
+			if pending.ChannelID != o.controller.SelectedChannelID() || !o.controller.Running() {
 				gate.clear()
 				retire()
 			}
@@ -372,8 +441,7 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 					gate.clear()
 					clearTimer()
 					retire()
-					o.app.preview.Cancel()
-					o.app.show("")
+					o.app.cancelPreview()
 					failure := fmt.Errorf("mpv %s: %s", event.Kind, event.Reason)
 					if err := o.controller.Fail(event.Generation, errors.Join(failure, event.Err)); err != nil {
 						reportPlayback(err)
@@ -474,23 +542,21 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 				retire()
 				err = o.app.Stop()
 				logPlayback("stop requested")
-			case "channel":
-				var ticket playback.PreviewTicket
-				ticket, err = o.app.RequestChannel(command.Direction, time.Now())
-				if err == nil {
-					clearRetry()
-					clearTimer()
-					previewSequence = ticket.Sequence
-					previewTimer = time.NewTimer(time.Until(ticket.Due))
-					previewC = previewTimer.C
-				}
 			case "cec":
+				resume := cecSelectsPi(command.Message, command.Adapter)
+				if resume {
+					clearRetry()
+				}
 				reason, err = o.app.HandleCEC(command.Message, command.Adapter)
-				if reason != "" {
+				if resume {
+					if err != nil {
+						reportPlayback(err)
+					}
+					logPlayback("CEC resume: " + reason)
+					waitForMedia()
+				} else if reason != "" {
 					clearRetry()
 					logPlayback("CEC stop: " + reason)
-				}
-				if !o.controller.Running() {
 					gate.clear()
 					clearTimer()
 					retire()

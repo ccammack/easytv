@@ -4,6 +4,7 @@ set -euo pipefail
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$project_dir"
 bash -n scripts/install.sh scripts/uninstall.sh
+grep -q 'GROUP:="easytv", MODE:="0640"' systemd/70-easytv-remote.rules
 
 for script in scripts/install.sh scripts/uninstall.sh; do
     if output="$(bash "$script" --invalid 2>&1)"; then

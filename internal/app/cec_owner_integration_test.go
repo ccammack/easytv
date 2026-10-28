@@ -163,9 +163,7 @@ func TestRealCECServiceStopsOwnerAndCancelsPreview(t *testing.T) {
 				t.Fatal("own Active Source stopped playback")
 			}
 			submit(OwnerCommand{Kind: "channel", Direction: 1})
-			if backend.claims.Load() != 1 {
-				t.Fatal("preview did not claim AS immediately")
-			}
+			waitChannelClaims(t, &backend.claims, 1)
 			backend.packets <- cec.ReceivedMessage{Raw: scenario.raw, Length: scenario.length}
 			stopped := receive()
 			if stopped.Running || stopped.Reason == "" {

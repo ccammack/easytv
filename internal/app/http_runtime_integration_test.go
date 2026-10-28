@@ -94,9 +94,7 @@ func TestRealHTTPControlsKeepCECMonitoringInternal(t *testing.T) {
 			if err != nil || !status.Running {
 				t.Fatal("power command manufactured observed standby")
 			}
-			if backend.claims.Load() != 2 {
-				t.Fatal("HTTP Active Source and channel commands must both claim via the service")
-			}
+			waitChannelClaims(t, &backend.claims, 2)
 			backend.packets <- cec.ReceivedMessage{Raw: scenario.raw, Length: scenario.length}
 			for {
 				status, err = owner.Submit(ctx, OwnerCommand{Kind: "status"})
