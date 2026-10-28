@@ -371,6 +371,42 @@ Interrupted CEC readiness, event-dequeue, and receive calls yield to the service
 
 ## Tests and operational limits
 
+### Runnable soak tests
+
+Run from the checkout after `make build`. Both scripts require Python 3 and Linux, have bounded durations, return nonzero on failure/interruption, and print the report directory. Reports contain `summary.json` and timestamped `events.jsonl` samples/actions. Use `--output /path/to/new-directory` to choose a new report directory; otherwise a private directory under `/tmp` is retained. Reports can include media paths and logs; keep them private.
+
+The isolated player soak never connects to the installed service or opens CEC hardware:
+
+```bash
+./scripts/soak-player.sh --duration 1h
+# If Go is not on PATH:
+./scripts/soak-player.sh --duration 1h --go /path/to/go
+```
+
+Prerequisites: the Go toolchain used to build EasyTV, `mpv`, `ffmpeg`, `libvips-tools`, and Python 3. Install missing fixture tools with `sudo apt install ffmpeg libvips-tools python3`. It first runs focused real-mpv integration scenarios with mock CEC for standby/source-away, recovery/cancellation, missing files, and live rescans; output is saved in `scenarios.log`. It then generates short WAV/video/image fixtures and invalid media in a private temporary workspace and launches `bin/easytv` with null audio/video, no CEC, isolated state, and a dynamically allocated loopback HTTP port.
+
+The sustained run exercises missing-file startup fallback, rescan, file advancement and channel switching, checks `/status`, and samples player memory, file descriptors, direct children, and workspace entries. After warmup, growth above 32 descriptors or 128 MiB RSS fails the run; more than four direct children or 100 workspace entries also fails. These are coarse leak guards, not guarantees of flat memory use. Expected invalid-media errors are retained in `player.log`; they do not themselves fail the run. The test stops its own player and removes its fixture/state workspace even on failure. Reports remain. Setup, focused scenarios, and cleanup add time beyond `--duration`.
+
+The appliance soak uses the running service's actual media and display:
+
+```bash
+./scripts/soak-appliance.sh --duration 8h
+```
+
+**Running this script authorizes real channel changes and, with CEC enabled, input selection.** It does not modify media, install anything, restart the service, or send power commands. It updates normal playback state through channel requests. The default target is `http://127.0.0.1:8080`; use `--url` and `--service` only to select the intended HTTP service and local systemd unit. Unit checks apply to the local machine, so a remote URL does not monitor that remote service's lifecycle.
+
+The appliance run requires working `/status`, `systemctl`, and `journalctl`. It fails on HTTP errors/timeouts, non-playing status, a changed last playback error, a stuck preview, or a service PID/restart/state change. Existing historical errors are recorded rather than treated as new failures. It saves a bounded current-boot application-user journal excerpt at completion; journal-access failures are recorded as warnings. It does not measure renderer smoothness, audio quality, or appliance process-resource growth.
+
+Both runners use a deterministic pattern: normal dwells alternate 45/90 seconds, every sixth action is a four-request burst 250 ms apart, and every tenth action is followed by a ten-minute dwell. Directions follow next/next/previous. `--interval 10s` changes the normal dwell base; long dwells remain ten minutes. Status is sampled about every two seconds, excluding request time. Short runs cannot cover every pattern or media ending. Ctrl-C stops the runner; appliance playback remains on its last selected channel.
+
+These are not a substitute for checking real picture/audio, TV standby, another device becoming active, or boot with the TV initially off. No public CEC feed is required.
+
+Runner smoke tests (no hardware):
+
+```bash
+python3 tests/soak_test.py
+```
+
 With real-integration opt-in variables unset:
 
 ```bash
