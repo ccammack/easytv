@@ -24,8 +24,17 @@ func (o *Owner) queueChannel(direction int, now time.Time) error {
 	if !o.accepting {
 		return errors.New("owner stopped")
 	}
+	if direction != 1 && direction != -1 {
+		return errors.New("direction must be +1 or -1")
+	}
 	trial := *a.preview
-	ticket, err := trial.Request(a.selected, direction, now)
+	var ticket playback.PreviewTicket
+	var err error
+	if _, pending := trial.Pending(); a.sourceAway && !pending {
+		ticket, err = trial.Resume(a.selected, now)
+	} else {
+		ticket, err = trial.Request(a.selected, direction, now)
+	}
 	if err != nil {
 		return err
 	}
@@ -47,6 +56,9 @@ func (o *Owner) finishClaim(claim channelClaim) (playback.PreviewTicket, bool) {
 	a := o.app
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.epoch == claim.epoch && claim.err == nil {
+		a.sourceAway = false
+	}
 	pending, ok := a.preview.Pending()
 	if !ok || a.epoch != claim.epoch || pending.Sequence != claim.ticket.Sequence {
 		return playback.PreviewTicket{}, false

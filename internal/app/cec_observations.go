@@ -11,13 +11,16 @@ import (
 // A TV selection of our current physical path resumes local playback.
 func (a *Coordinator) HandleCEC(message cec.ReceivedMessage, self cec.AdapterInfo) (string, error) {
 	if cecSelectsPi(message, self) {
+		a.mu.Lock()
+		a.sourceAway = false
+		a.mu.Unlock()
 		return "tv_selected_pi", a.controller.Start()
 	}
 	reason := cecStopReason(message, self)
 	if reason == "" {
 		return "", nil
 	}
-	return reason, a.Stop()
+	return reason, a.stop(reason == "other_active_source")
 }
 
 func cecSelectsPi(message cec.ReceivedMessage, self cec.AdapterInfo) bool {

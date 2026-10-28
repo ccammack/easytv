@@ -44,6 +44,15 @@ func (p *Preview) Request(current string, direction int, now time.Time) (Preview
 	if direction != 1 && direction != -1 {
 		return PreviewTicket{}, fmt.Errorf("direction must be +1 or -1")
 	}
+	return p.request(current, direction, now)
+}
+
+// Resume schedules the current channel without advancing the selection.
+func (p *Preview) Resume(current string, now time.Time) (PreviewTicket, error) {
+	return p.request(current, 0, now)
+}
+
+func (p *Preview) request(current string, direction int, now time.Time) (PreviewTicket, error) {
 	base := current
 	if p.pending != nil {
 		base = p.pending.ChannelID

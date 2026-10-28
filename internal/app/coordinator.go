@@ -14,6 +14,7 @@ type Coordinator struct {
 	mu         sync.Mutex
 	selected   string
 	epoch      uint64
+	sourceAway bool
 	controller *playback.Controller
 	preview    *playback.Preview
 	claim      playback.ClaimSource
@@ -47,7 +48,14 @@ func (a *Coordinator) CommitPreview(sequence uint64, now time.Time) error {
 	return err
 }
 func (a *Coordinator) Stop() error {
-	a.cancelPreview()
+	return a.stop(false)
+}
+
+func (a *Coordinator) stop(sourceAway bool) error {
+	a.mu.Lock()
+	a.sourceAway = sourceAway
+	a.cancelPreviewLocked()
+	a.mu.Unlock()
 	return a.controller.Stop()
 }
 
@@ -60,6 +68,10 @@ func (a *Coordinator) pending() (playback.PreviewTicket, bool) {
 func (a *Coordinator) cancelPreview() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.cancelPreviewLocked()
+}
+
+func (a *Coordinator) cancelPreviewLocked() {
 	a.epoch++
 	a.preview.Cancel()
 	a.show("")
