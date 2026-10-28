@@ -17,6 +17,16 @@ type fakeControls struct {
 	rescanErr error
 }
 
+func (c *fakeControls) AdjustVolume(_ context.Context, delta float64) error {
+	c.volume += delta
+	c.calls++
+	return nil
+}
+func (c *fakeControls) ToggleMute(context.Context) error {
+	c.muted = !c.muted
+	c.calls++
+	return nil
+}
 func (c *fakeControls) ChangeChannel(_ context.Context, direction int) error {
 	c.direction = direction
 	c.calls++
@@ -64,6 +74,35 @@ func TestPlaybackControlValidationAndDispatch(t *testing.T) {
 		}
 	}
 	if controls.direction != -1 || controls.volume != 0 || controls.muted || controls.calls != 6 {
+		t.Fatalf("controls=%+v", controls)
+	}
+}
+
+func TestRelativeAudioControls(t *testing.T) {
+	controls := &fakeControls{}
+	server := NewServer(nil)
+	server.SetPlaybackControls(controls)
+	for _, test := range []struct {
+		path, body string
+		want       int
+	}{
+		{"/volume/adjust", `{"delta":5}`, 204},
+		{"/volume/adjust", `{"delta":-5}`, 204},
+		{"/volume/adjust", `{}`, 400},
+		{"/volume/adjust", `{"delta":null}`, 400},
+		{"/volume/adjust", `{"delta":101}`, 400},
+		{"/volume/adjust", `{"delta":-101}`, 400},
+		{"/volume/adjust", `{"delta":5,"extra":1}`, 400},
+		{"/volume/adjust", `{"delta":5} {}`, 400},
+		{"/mute/toggle", `{}`, 204},
+	} {
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, httptest.NewRequest("POST", test.path, strings.NewReader(test.body)))
+		if response.Code != test.want {
+			t.Fatalf("%s %s status=%d", test.path, test.body, response.Code)
+		}
+	}
+	if controls.calls != 3 || controls.volume != 0 || !controls.muted {
 		t.Fatalf("controls=%+v", controls)
 	}
 }

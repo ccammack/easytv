@@ -105,6 +105,19 @@ func TestRealHTTPPlaybackControlsUseOwner(t *testing.T) {
 	if value, err := ipc.Volume(ctx); err != nil || value != 25.5 {
 		t.Fatalf("volume=%v err=%v", value, err)
 	}
+	post("/volume/adjust", `{"delta":5}`)
+	if value, err := ipc.Volume(ctx); err != nil || value != 30.5 {
+		t.Fatalf("adjusted volume=%v err=%v", value, err)
+	}
+	post("/volume/adjust", `{"delta":100}`)
+	if value, err := ipc.Volume(ctx); err != nil || value != 100 {
+		t.Fatalf("clamped volume=%v err=%v", value, err)
+	}
+	post("/volume/adjust", `{"delta":-100}`)
+	post("/volume/adjust", `{"delta":-5}`)
+	if value, err := ipc.Volume(ctx); err != nil || value != 0 {
+		t.Fatalf("clamped volume=%v err=%v", value, err)
+	}
 	post("/mute", `{"muted":true}`)
 	if value, err := ipc.Muted(ctx); err != nil || !value {
 		t.Fatalf("mute=%v err=%v", value, err)
@@ -112,6 +125,14 @@ func TestRealHTTPPlaybackControlsUseOwner(t *testing.T) {
 	post("/mute", `{"muted":false}`)
 	if value, err := ipc.Muted(ctx); err != nil || value {
 		t.Fatalf("mute=%v err=%v", value, err)
+	}
+	post("/mute/toggle", `{}`)
+	if value, err := ipc.Muted(ctx); err != nil || !value {
+		t.Fatalf("toggled mute=%v err=%v", value, err)
+	}
+	post("/mute/toggle", `{}`)
+	if value, err := ipc.Muted(ctx); err != nil || value {
+		t.Fatalf("toggled mute=%v err=%v", value, err)
 	}
 	post("/channel", `{"direction":"next"}`)
 	if status := readStatus(); status.PendingChannelID != "/b" {

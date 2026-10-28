@@ -11,6 +11,7 @@ import (
 	"github.com/ccammack/easytv/internal/playback"
 	"github.com/ccammack/easytv/internal/state"
 	"log"
+	"math"
 	"path/filepath"
 	"sync/atomic"
 	"time"
@@ -428,16 +429,33 @@ func (o *Owner) Run(ctx context.Context) (result error) {
 					}()
 					continue
 				}
-			case "volume", "mute":
+			case "volume", "mute", "volume-adjust", "mute-toggle":
 				if !o.controller.Running() {
 					err = errors.New("player not running")
 				} else {
 					client := o.player.Client()
 					commandCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-					if command.Kind == "volume" {
+					switch command.Kind {
+					case "volume":
 						err = client.SetVolume(commandCtx, command.Volume)
-					} else {
+					case "mute":
 						err = client.SetMute(commandCtx, command.Muted)
+					case "volume-adjust":
+						if math.IsNaN(command.Volume) || math.IsInf(command.Volume, 0) || command.Volume < -100 || command.Volume > 100 {
+							err = errors.New("volume delta must be from -100 to 100")
+							break
+						}
+						var current float64
+						current, err = client.Volume(commandCtx)
+						if err == nil {
+							err = client.SetVolume(commandCtx, math.Max(0, math.Min(100, current+command.Volume)))
+						}
+					case "mute-toggle":
+						var muted bool
+						muted, err = client.Muted(commandCtx)
+						if err == nil {
+							err = client.SetMute(commandCtx, !muted)
+						}
 					}
 					cancel()
 				}

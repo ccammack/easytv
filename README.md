@@ -55,12 +55,13 @@ The installer installs these runtime prerequisites using apt:
 - `libvips-tools` for `vipsheader` and `vipsthumbnail` image preparation.
 - `aosd-cat` and fonts for channel previews.
 - Minimal Xorg, `xinit`/`startx`, `xauth`, and `libpam-systemd` for the console X session.
+- Elixir, Erlang development headers, build tools, and CA certificates for the companion remote script and its `input_event` dependency.
 
 CEC is part of EasyTV's Go implementation: no separately cloned CEC project, `cec-client`, or libCEC daemon is needed.
 
 The installer creates the non-login `easytv` user/group, adds `video`, `render`, and `audio` hardware access, installs a root-owned `/usr/local/bin/easytv`, and installs/enables `easytv.service`. State/home is private to the service at `/var/lib/easytv`; systemd creates `/run/easytv` for temporary workspace and X authorization. No audio server, mixer hooks, or system-volume configuration is installed by EasyTV.
 
-**Installation enables next-boot startup but deliberately does not start/restart playback or take over your current console.** It does not configure media mounts, change media ownership, or modify your login profiles. Reinstalling updates the binary and base unit; local systemd drop-ins and saved state are preserved.
+**Installation enables next-boot startup but deliberately does not start/restart playback or take over your current console.** It does not configure media mounts, change media ownership, or modify your login profiles. Reinstalling updates the binary and base units; local systemd drop-ins, saved state, and the editable remote script in `/etc/easytv` are preserved. Installation prepares the remote dependency cache as `easytv` and requires download access on the first install.
 
 ### Review paths and start
 
@@ -329,7 +330,9 @@ HTTP is disabled unless `--listen` is supplied. There is no built-in authenticat
 | `GET` | `/status` | Local playback status JSON; does not query or infer TV state. |
 | `POST` | `/channel` | JSON `{"direction":"next"}` or `{"direction":"previous"}`. |
 | `POST` | `/volume` | JSON `{"volume":50}`; finite numeric range 0 through 100. |
+| `POST` | `/volume/adjust` | JSON `{"delta":5}`; delta -100 through 100, resulting mpv volume clamped to 0 through 100. |
 | `POST` | `/mute` | JSON `{"muted":true}` or `{"muted":false}`. |
+| `POST` | `/mute/toggle` | No body required; toggle the current mpv mute property. |
 | `POST` | `/rescan` | No body; refresh configured media roots and apply the result before returning 204. Concurrent rescan: 409; failures: 500. |
 | `POST` | `/power` | JSON `{"state":"on"}` or `{"state":"off"}`; requires CEC. |
 | `POST` | `/active-source` | No body required; explicit CEC Active Source assertion. |
@@ -357,6 +360,67 @@ curl --fail-with-body -i -H 'Content-Type: application/json' \
   -d '{"volume":50}' http://127.0.0.1:8080/volume
 curl --fail-with-body -i -H 'Content-Type: application/json' \
   -d '{"muted":false}' http://127.0.0.1:8080/mute
+```
+
+## Keyboard/FLIRC REST bridge
+
+The executable `scripts/easytv-remote.exs` script reads Linux input events and calls the running Go application's HTTP API. It does not launch a player, manage channels, control OS volume, or open CEC. It uses the old `easytv.exs` key mappings without running that legacy application.
+
+`sudo make install` deploys both services and installs Elixir/build prerequisites. The script has an Elixir shebang and uses `Mix.install` internally; it is not a Mix project or release. The installer runs its `--prepare` mode as `easytv` to populate the dependency cache under `/var/lib/easytv` without opening input devices. Normal service startup reuses that cache. Removing the cache, changing dependency declarations, or upgrading Elixir can require preparing it again with download access.
+
+The installed editable script is `/etc/easytv/easytv-remote.exs`; reinstall preserves it. A fresh shipped copy is updated at `/usr/local/lib/easytv/easytv-remote.exs` for comparison. After editing the installed script, restart `easytv-remote.service`; dependency changes may require running `sudo -u easytv env HOME=/var/lib/easytv /etc/easytv/easytv-remote.exs --prepare` first. Uninstall removes both base units, the shipped script and installed udev rule, but preserves `/etc/easytv`, cached dependencies/state and local unit overrides.
+
+Starting, stopping, and restarting `easytv.service` also manages `easytv-remote.service`. The remote restarts independently on failure, so an unplugged remote does not restart video playback. The companion is pulled in by the main service; it needs no separate enable command. Keep HTTP enabled and adjust the remote URL if changing the main listener.
+
+### Find and select the remote keyboard
+
+List stable keyboard paths and inspect the candidate's identity:
+
+```bash
+ls -l /dev/input/by-id/*-event-kbd
+udevadm info --query=property --name=/dev/input/by-id/YOUR_REMOTE-event-kbd
+```
+
+Look for `ID_MODEL`, `ID_SERIAL`, `ID_VENDOR_ID`, `ID_MODEL_ID`, and `ID_INPUT_KEYBOARD=1`. Compare the listing before/after unplugging the remote if its name is unclear. The tested FLIRC reports `ID_VENDOR_ID=20a0` and `ID_MODEL_ID=0006`; the installer grants the `easytv` group read access only to keyboard event nodes with those USB IDs. Other keyboards are not granted access. For another remote, create a local udev rule matching its verified vendor/product (and serial if needed) rather than broadening permissions to all input devices, reload rules, and reconnect the device.
+
+The script accepts one or more device paths as positional command-line arguments. To select the remote explicitly for deployment:
+
+```bash
+sudo systemctl edit easytv-remote.service
+```
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/etc/easytv/easytv-remote.exs --url http://127.0.0.1:8080 /dev/input/by-id/YOUR_REMOTE-event-kbd
+```
+
+Apply with `sudo systemctl daemon-reload` and `sudo systemctl restart easytv.service` (interrupts playback), or restart only `easytv-remote.service` if EasyTV is already running. Check access with `sudo -u easytv test -r /dev/input/by-id/YOUR_REMOTE-event-kbd`. Remote logs are available with `journalctl -u easytv-remote.service -b --no-pager -n 100` or `-f` to follow live.
+
+For manual use from the checkout, after stopping the companion to avoid duplicate requests:
+
+```bash
+./scripts/easytv-remote.exs --url http://127.0.0.1:8080 \
+  /dev/input/by-id/YOUR_REMOTE-event-kbd
+```
+
+The invoking user needs read permission on the chosen input device. Configure narrowly scoped device permissions for the remote rather than running the bridge as root or making all input devices world-readable. Broad `input` group access can expose every keyboard's keystrokes. Without explicit paths the script watches all `/dev/input/by-id/*-event-kbd` devices; it deliberately does not fall back to every event device. Devices are selected at startup; restart the bridge after reconnecting a remote if necessary.
+
+| Key | Action |
+| --- | --- |
+| Page Up / Page Down | Previous / next channel through EasyTV, including its preview and CEC policy. |
+| Minus / keypad minus | No-op volume-down stub; the remote controls TV volume directly. |
+| Equal / plus / keypad plus | No-op volume-up stub; the remote controls TV volume directly. |
+| M | No-op mute stub; the remote controls TV mute directly. |
+| Space | No-op power stub; the remote already controls the TV directly. |
+| Q | Ignored; no quit behavior. |
+
+Only key-down events are handled; releases and auto-repeat are ignored. The bridge sends REST requests only for channel changes; power, volume, and mute stubs send nothing to avoid doubling the remote's direct TV controls. The mpv volume/mute REST endpoints remain available to other clients. HTTP failures/timeouts are logged; requests are not automatically retried because repeating a channel step could change the intended selection. Ctrl-C stops only the bridge, not EasyTV. Keep the unauthenticated API on loopback or use a separately secured connection.
+
+Bridge tests do not open input devices or download dependencies:
+
+```bash
+elixir tests/keyboard_test.exs
 ```
 
 ## CEC policy
@@ -396,6 +460,53 @@ The appliance soak uses the running service's actual media and display:
 **Running this script authorizes real channel changes and, with CEC enabled, input selection.** It does not modify media, install anything, restart the service, or send power commands. It updates normal playback state through channel requests. The default target is `http://127.0.0.1:8080`; use `--url` and `--service` only to select the intended HTTP service and local systemd unit. Unit checks apply to the local machine, so a remote URL does not monitor that remote service's lifecycle.
 
 The appliance run requires working `/status`, `systemctl`, and `journalctl`. It fails on HTTP errors/timeouts, non-playing status, a changed last playback error, a stuck preview, or a service PID/restart/state change. Existing historical errors are recorded rather than treated as new failures. It saves a bounded current-boot application-user journal excerpt at completion; journal-access failures are recorded as warnings. It does not measure renderer smoothness, audio quality, or appliance process-resource growth.
+
+#### Run overnight and inspect logs
+
+To run independently of your SSH connection, start a transient user service from the checkout:
+
+```bash
+cd ~/easytv
+systemd-run --user --unit=easytv-soak --collect \
+  --working-directory="$PWD" \
+  "$PWD/scripts/soak-appliance.sh" --duration 8h
+```
+
+Check `loginctl show-user "$USER" -p Linger`. If it reports `Linger=no`, enable lingering with `sudo loginctl enable-linger "$USER"` so the user manager survives logout. This also allows your other enabled user services to run without a login; undo later with `sudo loginctl disable-linger "$USER"` if desired.
+
+Check the runner and its startup/completion output:
+
+```bash
+systemctl --user status easytv-soak.service --no-pager -l
+journalctl --user -u easytv-soak.service -f
+```
+
+Some Raspberry Pi OS installations do not have a separate user journal and report `No journal files were found`. That does not mean the soak failed. Read the user-unit messages from the system journal instead (add `sudo` if access is denied):
+
+```bash
+journalctl -b _SYSTEMD_USER_UNIT=easytv-soak.service --no-pager -n 100
+journalctl -b _SYSTEMD_USER_UNIT=easytv-soak.service -f
+```
+
+The runner prints its report directory at startup. Substitute that exact directory below; do not assume the random suffix is the same on another run:
+
+```bash
+REPORT=/tmp/easytv-soak-report-REPLACE_WITH_YOUR_RUN
+tail -f "$REPORT/events.jsonl"
+# After completion or failure:
+cat "$REPORT/summary.json"
+tail -n 100 "$REPORT/journal.log"
+```
+
+`events.jsonl` is the detailed live progress log; the runner's journal output is mainly startup and the final summary. Samples show local playback/resume position, pending selection, last error, and service identity/restart count. Advancing positions with `playing`, no new errors, and a stable PID/restart count are healthy signs, not proof of visible video/audio. Long quiet dwells between channel actions are intentional. `summary.json` is written only when the runner finishes; `journal.log` is captured at that time for appliance runs. Isolated runs instead include `player.log` and `scenarios.log`.
+
+Use the [application-user journal commands](#check-startup-and-playback-logs) for EasyTV/mpv errors; the soak-runner journal and EasyTV's journal are different logs. Ctrl-C while following logs stops only the log viewer. To stop the background soak:
+
+```bash
+systemctl --user stop easytv-soak.service
+```
+
+Stopping it normally writes an `INTERRUPTED` summary, not a pass. With `--collect`, the transient unit can disappear after exit; retained report files and journal entries are the source of the final result. Default reports under `/tmp` may be removed on reboot or by cleanup policies; use `--output` with a new private directory elsewhere if results must survive those events.
 
 Both runners use a deterministic pattern: normal dwells alternate 45/90 seconds, every sixth action is a four-request burst 250 ms apart, and every tenth action is followed by a ten-minute dwell. Directions follow next/next/previous. `--interval 10s` changes the normal dwell base; long dwells remain ten minutes. Status is sampled about every two seconds, excluding request time. Short runs cannot cover every pattern or media ending. Ctrl-C stops the runner; appliance playback remains on its last selected channel.
 

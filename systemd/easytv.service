@@ -1,5 +1,6 @@
 [Unit]
 Description=EasyTV fullscreen appliance
+Wants=easytv-remote.service
 Requires=systemd-logind.service
 After=systemd-logind.service systemd-user-sessions.service getty@tty1.service
 Conflicts=getty@tty1.service

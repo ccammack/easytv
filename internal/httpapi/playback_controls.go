@@ -15,7 +15,41 @@ type PlaybackControls interface {
 	ChangeChannel(context.Context, int) error
 	SetVolume(context.Context, float64) error
 	SetMute(context.Context, bool) error
+	AdjustVolume(context.Context, float64) error
+	ToggleMute(context.Context) error
 	Rescan(context.Context) error
+}
+
+func (s *Server) adjustVolumeHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Delta *float64 `json:"delta"`
+	}
+	if err := decodeControl(w, r, &body); err != nil || body.Delta == nil ||
+		math.IsNaN(*body.Delta) || math.IsInf(*body.Delta, 0) || *body.Delta < -100 || *body.Delta > 100 {
+		http.Error(w, "delta must be a number from -100 to 100", http.StatusBadRequest)
+		return
+	}
+	if s.controls == nil {
+		http.Error(w, "playback unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if err := s.controls.AdjustVolume(r.Context(), *body.Delta); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) toggleMuteHandler(w http.ResponseWriter, r *http.Request) {
+	if s.controls == nil {
+		http.Error(w, "playback unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if err := s.controls.ToggleMute(r.Context()); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) rescanHandler(w http.ResponseWriter, r *http.Request) {

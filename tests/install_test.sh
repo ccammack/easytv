@@ -28,8 +28,8 @@ fi
 work="$(mktemp -d /tmp/easytv-install-test.XXXXXX)"
 trap 'rm -rf -- "$work"' EXIT
 mkdir -p "$work/mock" "$work/state" "$work/project/bin" "$work/project/scripts" "$work/project/systemd"
-cp scripts/install.sh scripts/uninstall.sh "$work/project/scripts/"
-cp systemd/easytv.service "$work/project/systemd/"
+cp scripts/install.sh scripts/uninstall.sh scripts/easytv-remote.exs "$work/project/scripts/"
+cp systemd/easytv.service systemd/easytv-remote.service systemd/70-easytv-remote.rules "$work/project/systemd/"
 printf '#!/bin/sh\nexit 0\n' > "$work/project/bin/easytv"
 chmod 0755 "$work/project/bin/easytv"
 
@@ -66,6 +66,12 @@ case "$command" in
     groupadd) touch /test/state/group ;;
     useradd) touch /test/state/user ;;
     usermod) ;;
+    runuser)
+        [[ $* == '-u easytv -- env HOME=/var/lib/easytv /usr/local/lib/easytv/easytv-remote.exs --prepare' ||
+           $* == '-u easytv -- env HOME=/var/lib/easytv mix local.hex --force' ]]
+        [[ ! -e /test/state/prepare-fails ]]
+        ;;
+    udevadm) ;;
     install)
         args=()
         while [[ $# != 0 ]]; do
@@ -98,6 +104,7 @@ case "$command" in
                 [[ $* == 'disable --now easytv.service' ]]
                 rm -f /etc/systemd/system/multi-user.target.wants/easytv.service
                 ;;
+            stop) [[ $* == 'stop easytv-remote.service' ]] ;;
             *) printf 'Unexpected systemctl command: %s\n' "$*" >&2; exit 1 ;;
         esac
         ;;
@@ -105,7 +112,7 @@ case "$command" in
 esac
 MOCK
 chmod 0755 "$work/mock/command"
-for command in apt-get getent groupadd useradd usermod install id systemctl; do
+for command in apt-get getent groupadd useradd usermod install id systemctl runuser udevadm; do
     ln -s command "$work/mock/$command"
 done
 
@@ -144,6 +151,11 @@ printf 'media\n' > /mnt/media/Channel/keep
 bash scripts/install.sh
 cmp bin/easytv /usr/local/bin/easytv
 cmp systemd/easytv.service /etc/systemd/system/easytv.service
+cmp systemd/easytv-remote.service /etc/systemd/system/easytv-remote.service
+cmp scripts/easytv-remote.exs /etc/easytv/easytv-remote.exs
+cmp scripts/easytv-remote.exs /usr/local/lib/easytv/easytv-remote.exs
+cmp systemd/70-easytv-remote.rules /etc/udev/rules.d/70-easytv-remote.rules
+[[ $(stat -c %a /etc/easytv/easytv-remote.exs) == 755 ]]
 [[ $(stat -c %a /usr/local/bin/easytv) == 755 ]]
 [[ $(stat -c %a /etc/systemd/system/easytv.service) == 644 ]]
 [[ $(stat -c %a /var/lib/easytv) == 700 ]]
@@ -154,15 +166,28 @@ grep -q '^usermod --append --groups video,render,audio easytv$' /test/commands
 printf 'saved\n' > /var/lib/easytv/state.json
 mkdir -p /etc/systemd/system/easytv.service.d
 printf '[Service]\n' > /etc/systemd/system/easytv.service.d/local.conf
+printf '# user customization\n' >> /etc/easytv/easytv-remote.exs
+mkdir -p /etc/systemd/system/easytv-remote.service.d
+printf '[Service]\n' > /etc/systemd/system/easytv-remote.service.d/local.conf
 
 bash scripts/install.sh
 [[ $(grep -c '^useradd ' /test/commands) == 1 ]]
 [[ $(grep -c '^groupadd ' /test/commands) == 1 ]]
 [[ $(cat /var/lib/easytv/state.json) == saved ]]
 [[ -f /etc/systemd/system/easytv.service.d/local.conf ]]
+grep -q '# user customization' /etc/easytv/easytv-remote.exs
+[[ -f /etc/systemd/system/easytv-remote.service.d/local.conf ]]
+
+touch /test/state/prepare-fails
+expect_failure '' bash scripts/install.sh
+rm /test/state/prepare-fails
 
 bash scripts/uninstall.sh
 [[ ! -e /usr/local/bin/easytv && ! -e /etc/systemd/system/easytv.service ]]
+[[ ! -e /etc/systemd/system/easytv-remote.service && ! -e /usr/local/lib/easytv/easytv-remote.exs ]]
+[[ ! -e /etc/udev/rules.d/70-easytv-remote.rules ]]
+grep -q '# user customization' /etc/easytv/easytv-remote.exs
+[[ -f /etc/systemd/system/easytv-remote.service.d/local.conf ]]
 [[ ! -e /etc/systemd/system/multi-user.target.wants/easytv.service ]]
 [[ -f /test/state/user && -f /test/state/group ]]
 [[ $(cat /var/lib/easytv/state.json) == saved ]]
