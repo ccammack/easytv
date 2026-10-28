@@ -10,7 +10,7 @@ The historical Elixir reference still contains calls to those retired hooks. It 
 
 Functional checkpoint `70ef2d5` adds opt-in owned OSD previews after the IPC-teardown and successful-start persistence fixes. Isolated validation passed with real mpv/null outputs, mock CEC, HTTP controls/streams, image timing/preparation, persistence/restart, SIGTERM, and fake-overlay process lifecycle tests.
 
-Actual display/audio, real `aosd_cat` rendering/timing, physical CEC behavior, and unattended boot remain separate acceptance work. See [Go deployment and acceptance](docs/go-deployment.md) before changing a live installation.
+Actual display/audio, real `aosd_cat` rendering/timing, physical CEC behavior, and unattended boot remain separate acceptance work. Follow the [installation instructions](#install-on-raspberry-pi-os-lite) and [soak-test guidance](#runnable-soak-tests) before changing a live installation.
 
 ## Clone and build
 
