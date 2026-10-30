@@ -68,6 +68,10 @@ case "$command" in
     useradd) touch /test/state/user ;;
     usermod) ;;
     runuser)
+        [[ $PWD == /var/lib/easytv ]] || {
+            printf 'Dependency preparation must run from EasyTV home, not %s\n' "$PWD" >&2
+            exit 1
+        }
         [[ $* == '-u easytv -- env HOME=/var/lib/easytv /usr/local/lib/easytv/easytv-remote.exs --prepare' ||
            $* == '-u easytv -- env HOME=/var/lib/easytv mix local.hex --force' ]]
         [[ ! -e /test/state/prepare-fails ]]

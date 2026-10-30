@@ -60,8 +60,11 @@ install -o root -g root -m 0644 "$project_dir/systemd/easytv-remote.service" \
     /etc/systemd/system/easytv-remote.service
 install -o root -g root -m 0644 "$project_dir/systemd/70-easytv-remote.rules" \
     /etc/udev/rules.d/70-easytv-remote.rules
-runuser -u easytv -- env HOME=/var/lib/easytv mix local.hex --force
-runuser -u easytv -- env HOME=/var/lib/easytv /usr/local/lib/easytv/easytv-remote.exs --prepare
+(
+    cd /var/lib/easytv
+    runuser -u easytv -- env HOME=/var/lib/easytv mix local.hex --force
+    runuser -u easytv -- env HOME=/var/lib/easytv /usr/local/lib/easytv/easytv-remote.exs --prepare
+)
 udevadm control --reload-rules
 udevadm trigger --subsystem-match=input
 systemctl daemon-reload

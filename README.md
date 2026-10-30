@@ -394,7 +394,13 @@ The executable `scripts/easytv-remote.exs` script reads Linux input events and c
 
 `sudo make install` deploys both services and installs Elixir/build prerequisites. The script has an Elixir shebang and uses `Mix.install` internally; it is not a Mix project or release. The installer runs its `--prepare` mode as `easytv` to populate the dependency cache under `/var/lib/easytv` without opening input devices. Normal service startup reuses that cache. Removing the cache, changing dependency declarations, or upgrading Elixir can require preparing it again with download access.
 
-The installed editable script is `/etc/easytv/easytv-remote.exs`; reinstall preserves it. A fresh shipped copy is updated at `/usr/local/lib/easytv/easytv-remote.exs` for comparison. After editing the installed script, restart `easytv-remote.service`; dependency changes may require running `sudo -u easytv env HOME=/var/lib/easytv /etc/easytv/easytv-remote.exs --prepare` first. Uninstall removes both base units, the shipped script and installed udev rule, but preserves `/etc/easytv`, cached dependencies/state and local unit overrides.
+The installed editable script is `/etc/easytv/easytv-remote.exs`; reinstall preserves it. A fresh shipped copy is updated at `/usr/local/lib/easytv/easytv-remote.exs` for comparison. After editing the installed script, restart `easytv-remote.service`; dependency changes may require preparing its cache first:
+
+```bash
+(cd /tmp && sudo -u easytv env HOME=/var/lib/easytv /etc/easytv/easytv-remote.exs --prepare)
+```
+
+`Mix.install` needs a working directory accessible to `easytv`; setting `HOME` alone does not change it. The installer prepares dependencies from `/var/lib/easytv`, so your checkout can remain private. Uninstall removes both base units, the shipped script and installed udev rule, but preserves `/etc/easytv`, cached dependencies/state and local unit overrides.
 
 Starting, stopping, and restarting `easytv.service` also manages `easytv-remote.service`. The remote restarts independently on failure, so an unplugged remote does not restart video playback. The companion is pulled in by the main service; it needs no separate enable command. Keep HTTP enabled and adjust the remote URL if changing the main listener.
 
