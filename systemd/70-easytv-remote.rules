@@ -1,1 +1,1 @@
-SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEYBOARD}=="1", ATTRS{idVendor}=="20a0", ATTRS{idProduct}=="0006", GROUP:="easytv", MODE:="0640"
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEYBOARD}=="1", GROUP:="easytv", MODE:="0640"

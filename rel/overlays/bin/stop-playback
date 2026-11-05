@@ -1,0 +1,46 @@
+#!/bin/sh
+set -eu
+
+pid_file=${EASYTV_PID_FILE:?EASYTV_PID_FILE is required}
+if [ ! -f "$pid_file" ]; then
+  echo "EasyTV playback PID file is absent; playback has not started" >&2
+  exit 0
+fi
+if ! read -r pid < "$pid_file"; then
+  echo "Could not read EasyTV playback PID from $pid_file" >&2
+  exit 1
+fi
+case "$pid" in
+  ''|*[!0-9]*|0|1)
+    echo "Invalid EasyTV playback PID: $pid" >&2
+    exit 1
+    ;;
+esac
+playback_running() {
+  kill -0 "$pid" 2>/dev/null || return 1
+  status=$(ps -p "$pid" -o stat=) || return 1
+  case "$status" in Z*) return 1 ;; esac
+}
+if ! playback_running; then
+  exit 0
+fi
+bin_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+executable=$(readlink "/proc/$pid/exe")
+release_root=$(CDPATH= cd -- "$bin_dir/.." && pwd)
+case "$executable" in
+  "$release_root"/erts-*/bin/beam.smp) ;;
+  *)
+    echo "PID $pid is not this release's Erlang VM: $executable" >&2
+    exit 1
+    ;;
+esac
+kill -TERM "$pid"
+attempt=0
+while playback_running; do
+  if [ "$attempt" -ge 12 ]; then
+    echo "EasyTV graceful shutdown timed out for PID $pid" >&2
+    exit 1
+  fi
+  sleep 1
+  attempt=$((attempt + 1))
+done

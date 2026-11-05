@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+bin_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -n "${EASYTV_PID_FILE:-}" ]; then
+  printf '%s\n' "$$" > "$EASYTV_PID_FILE"
+fi
+exec "$bin_dir/easytv" eval 'EasyTV.CLI.main(System.argv())' "$@"

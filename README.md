@@ -1,137 +1,118 @@
-# EasyTV (Go)
+# easytv
 
-EasyTV provides directory-based looping mpv channels for a Linux/Raspberry Pi appliance. The Go executable owns playback, persistence, optional Linux HDMI-CEC, optional HTTP controls, and optional channel-preview overlays.
+**Raspberry Pi TV appliance for a six-button remote**
 
-This README describes `cmd/easytv`. The obsolete `volume.sh`, `power.sh`, and `channel.sh` hooks have been removed; Go controls mpv and CEC internally. The Go entrypoint does not install legacy evdev/FLIRC input handling.
+easytv wraps [mpv](https://github.com/mpv-player/mpv) to create a minimal
+TV appliance for Raspberry Pi. It was developed on a Raspberry Pi 4B v1.2 
+with 4 GB of RAM at 720p, using [FLIRC](https://flirc.tv/) and an EZclicker 
+six-button remote.
 
-## Validation boundary
+Channels are defined by directory layout rather than configuration.
+Pass one or more *media root* directories on the command line, and each
+immediate child directory containing media is treated as a *channel*.
+For example, passing `/mnt/media` as a *media root* defines two channels
+from the directory structure below: **Movies (1940s)** and **Scrapbook**.
 
-Functional checkpoint `70ef2d5` adds opt-in owned OSD previews after the IPC-teardown and successful-start persistence fixes. Isolated validation passed with real mpv/null outputs, mock CEC, HTTP controls/streams, image timing/preparation, persistence/restart, SIGTERM, and fake-overlay process lifecycle tests.
-
-Actual display/audio, real `aosd_cat` rendering/timing, physical CEC behavior, and unattended boot remain separate acceptance work. Follow the [installation instructions](#install-on-raspberry-pi-os-lite) and [soak-test guidance](#runnable-soak-tests) before changing a live installation.
-
-## Clone and build
-
-The appliance installation targets Raspberry Pi OS Lite with systemd, KMS graphics, and a working HDMI display/CEC adapter. No desktop environment is needed. The commands below use Raspberry Pi OS Lite Trixie; older releases may need a newer Go bootstrap toolchain from [go.dev](https://go.dev/doc/install).
-
-Install the build prerequisites: Git, Make, CA certificates, and Go. A Go toolchain compatible with the `go 1.26.5` directive in `go.mod` is required. Trixie's Go package can download that version using Go's toolchain mechanism (requires Go 1.21 or newer):
-
-```bash
-sudo apt-get update
-sudo apt-get install -y git make ca-certificates golang-go
-
-# Download/select the required Go toolchain as your normal user.
-export PATH="$(GOTOOLCHAIN=go1.26.5 go env GOROOT)/bin:$PATH"
-go version
+```text
+/mnt/media
+├── .inbox
+├── Movies (1940s)
+│   ├── ...
+│   └── ...
+├── Scrapbook
+│   ├── ...
+│   ├── ...
+│   └── ...
 ```
 
-Replace `<repository-url>` with the URL of your EasyTV repository. Build as your normal user, not root:
+Videos, music, and photos anywhere beneath a channel directory form one
+sorted, looping playlist. Nested directories organize the media; they do
+not create additional channels. Hidden files and directories beginning
+with `.` are skipped, so `.inbox` will not be treated as a channel.
 
-```bash
-git clone <repository-url> easytv
+## Platform support
+
+easytv was written for Raspberry Pi and tested on Raspberry Pi OS Lite. 
+No desktop environment is needed: the supplied service starts a minimal 
+Xorg session on the first console. Other Linux systems may work, but the 
+installer and console service are intended for Raspberry Pi OS Lite.
+
+## Optional HDMI-CEC control
+
+If the Raspberry Pi is the only device connected to the TV, easytv 
+can run by itself. Select the Pi as the TV's active source and use
+the remote to control TV power and volume. When deployed this way,
+media playback will continue even while the TV is off.
+
+For automatic playback control when the TV powers off or switches inputs,
+run [cecmond](https://github.com/ccammack/cecmond) alongside easytv and 
+enable it using `--cec-url`. This is especially useful when other HDMI 
+devices share the same TV.
+
+Deploying this way allows easytv to stop playback when the TV enters 
+standby or another device becomes active, resume when the TV selects 
+the Pi, and request the Pi's HDMI input when a channel button is pressed.
+These actions depend on HDMI-CEC support from the TV and other connected
+equipment to operate as expected.
+
+# Build and install over SSH
+
+Start with a fresh install of Raspberry Pi OS Lite.
+Enable `ssh` when writing the microSD card using the 
+[Raspberry Pi Imager](https://www.raspberrypi.com/software/).
+
+Log in as a regular user over `ssh` and install the application 
+from source:
+
+```sh
+sudo apt update
+sudo apt install -y git elixir erlang-dev build-essential
+elixir --version # >= Elixir 1.14
+git clone https://github.com/ccammack/easytv.git
 cd easytv
-make
-./bin/easytv --help
-make test
+mix local.hex --force
+mix deps.get
+mix test
+MIX_ENV=prod mix release --overwrite
+bash scripts/install.sh --check
+sudo bash scripts/install.sh
 ```
 
-`make` outputs `./bin/easytv`. `make clean` removes that binary. Builds/tests use the selected local toolchain with module-network access disabled; the application has no external Go module dependencies. The PATH export above lasts for the current shell; repeat it in a new shell if needed.
+The installer installs runtime dependencies, creates a non-login `easytv`
+service account, and configures display, audio, and keyboard permissions.
+The release is installed at `/opt/easytv`, user configuration at
+`/etc/easytv/config.exs`, and playback state under `/var/lib/easytv`.
 
-Help and building do not start playback or install anything. Ordinary Go tests do not access real CEC/display hardware; real-mpv integration tests are opt-in. Installer tests use an isolated filesystem when `bwrap` is already available, otherwise report that those scenarios were skipped.
+Installation does not start the service or enable it at boot. Configure
+display, audio, and media before starting playback.
 
-## Install on Raspberry Pi OS Lite
+All attached keyboards, including FLIRC, can control easytv together.
+Connect them before starting; restart the service after attaching another
+keyboard. easytv reads physical keyboard input directly, not commands typed
+over `ssh`.
 
-From the built checkout:
+# Configure HDMI audio and 720p video
 
-```bash
-sudo make install
+On the Rpi 4B, HDMI0 is the port closest to the power connector.
+Configure that port as the audio output:
+
+```sh
+sudo env SUDO_USER=easytv raspi-config
 ```
 
-The installer installs these runtime prerequisites using apt:
+Choose **System Options → Audio**, then HDMI0, usually named
+`vc4-hdmi-0`. Finish and exit the menu.
 
-- `mpv` for playback.
-- `libvips-tools` for `vipsheader` and `vipsthumbnail` image preparation.
-- `aosd-cat` and fonts for channel previews.
-- Minimal Xorg, `xinit`/`startx`, `xauth`, and `libpam-systemd` for the console X session.
-- Elixir, Erlang development headers, build tools, and CA certificates for the companion remote script and its `input_event` dependency.
+Playback at high resolutions can be choppy on the Pi, so create
+an Xorg monitor file to set its resolution to **1280 x 720 (720p)**.
 
-CEC is part of EasyTV's Go implementation: no separately cloned CEC project, `cec-client`, or libCEC daemon is needed.
-
-The installer creates the non-login `easytv` user/group, adds `video`, `render`, and `audio` hardware access, installs a root-owned `/usr/local/bin/easytv`, and installs/enables `easytv.service`. State/home is private to the service at `/var/lib/easytv`; systemd creates `/run/easytv` for temporary workspace and X authorization. No audio server, mixer hooks, or system-volume configuration is installed by EasyTV.
-
-**Installation enables next-boot startup but deliberately does not start/restart playback or take over your current console.** It does not configure media mounts, change media ownership, or modify your login profiles. Reinstalling updates the binary and base units; local systemd drop-ins, saved state, and the editable remote script in `/etc/easytv` are preserved. Installation prepares the remote dependency cache as `easytv` and requires download access on the first install.
-
-### Review paths and start
-
-The supplied service uses `/dev/cec0`, `/mnt/media`, X display `:0` on `tty1`, channel overlays, a catalog rescan on every start, and HTTP controls bound to `127.0.0.1:8080`. Verify the correct CEC device and prepare the media before starting or rebooting:
-
-```bash
-ls -l /dev/cec*
-ls -la /mnt/media
-sudo -u easytv test -r /dev/cec0
-sudo -u easytv test -w /dev/cec0
-sudo -u easytv ls /mnt/media
-```
-
-Each media-root child directory is a channel (see below); files must be readable and directories traversable by `easytv`. Mount external storage persistently, for example through `/etc/fstab`, before starting. Use appropriate read-only permissions, filesystem mount options, or an existing media group; do not recursively hand ownership of your library to the service or make devices world-writable. The default CEC node normally belongs to `video`; if yours differs, grant narrowly scoped access through the appliance's device/group configuration. Do not run another CEC controller alongside EasyTV.
-
-All application arguments live in the systemd command line, not a separate config file. For different paths/options:
-
-```bash
-sudo systemctl edit easytv.service
-```
-
-For example, replace the command and mount dependency as follows (keep all options before the media roots):
-
-```ini
-[Unit]
-RequiresMountsFor=
-RequiresMountsFor=/srv/media
-
-[Service]
-ExecStart=
-ExecStart=/usr/bin/startx /usr/local/bin/easytv --cec-device=/dev/cec1 --state-dir=/var/lib/easytv --temp-dir=/run/easytv --listen=127.0.0.1:8080 --osd --scan /srv/media -- /usr/bin/Xorg :0 vt1 -keeptty -nolisten tcp -s 0 -dpms
-```
-
-Supply every media root both in the command and in `RequiresMountsFor`. Omit `--listen` to disable HTTP, or `--osd` to disable previews. Remove `--scan` to reuse the cached catalog rather than refresh on every start.
-
-Start from SSH or another console: the service reserves `tty1` and stops its login prompt while running. Do not use it alongside a desktop/display manager or another X session on that display.
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart easytv.service
-systemctl status easytv.service --no-pager
-journalctl -u easytv.service -b --no-pager -n 100
-```
-
-Once physical display/CEC acceptance is complete, reboot to check unattended startup:
-
-```bash
-sudo reboot
-```
-
-The service uses `startx` to authorize and start X without `.xinitrc` or `.bash_profile`; there is no shell autologin requirement. It waits for the configured media mounts, disables X screen blanking/DPMS, logs to the journal, and restarts the session after exit. EasyTV attempts playback automatically, but does **not** wake the television or select its HDMI input at startup. A running service is not proof of visible output; validate on the target Pi.
-
-### Set HDMI output to 720p
-
-For the supplied Xorg service on a Pi 4, configure Xorg to prefer 1280x720 before mpv starts. This was verified across a service restart and reboot on Raspberry Pi OS Lite based on Debian 13 Trixie. A kernel boot-resolution argument alone is insufficient: Xorg can override it with the TV's preferred 4K mode.
-
-With the service running, identify the connected Xorg output:
-
-```bash
-sudo -u easytv env DISPLAY=:0 XAUTHORITY=/run/easytv/Xauthority xrandr --current
-```
-
-If `xrandr` is missing, install it with `sudo apt install x11-xserver-utils`. The following example uses `HDMI-1`; substitute the connected output name reported on your Pi. Confirm that `1280x720` at 60 Hz is listed.
-
-Create a local Xorg monitor configuration:
-
-```bash
+```sh
 sudo mkdir -p /etc/X11/xorg.conf.d
 sudo nano /etc/X11/xorg.conf.d/10-easytv-monitor.conf
 ```
 
-If the file already exists, preserve its existing configuration rather than blindly overwriting it. Add:
+Configure the resolution mode, which must be supported by the TV.
+`HDMI-1` is the usual Xorg name for the Pi 4B's HDMI0 connection.
 
 ```text
 Section "Monitor"
@@ -140,452 +121,414 @@ Section "Monitor"
 EndSection
 ```
 
-Restart the entire session so both Xorg and the new mpv window start at the correct size. This interrupts playback:
+This sets the output resolution, but the Pi may still have trouble
+decoding very high resolution source media.
 
-```bash
-sudo systemctl restart easytv.service
-sudo -u easytv env DISPLAY=:0 XAUTHORITY=/run/easytv/Xauthority xrandr --current
+# Initial playback test with local media
+
+Use the provided script to generate some test channels under `/tmp/media`:
+
+```sh
+sudo bash scripts/generate-test-media.sh
+ls -R /tmp/media
 ```
 
-Allow time for Xorg to start before checking. Expect `current 1280 x 720` and `1280x720 60.00*+`: `*` marks the active mode and `+` the preferred mode. Other modes, including 4K, may still be listed; this is a startup preference, not a hard cap. Avoid changing resolution underneath a running player: its window may retain the old dimensions and appear cropped.
+The default configuration uses `/mnt/media` as a *media root*, so 
+temporarily bind-mount `/tmp/media` at `/mnt/media`. First, check that 
+`/mnt/media` is not already mounted. Continue with the next step only if the 
+output says it is not a mountpoint.
 
-Once playback fills the screen, reboot and repeat the check to verify unattended startup:
-
-```bash
-sudo reboot
+```sh
+mountpoint /mnt/media
 ```
 
-To undo this setup, remove only the configuration file you added and restart the service. This configuration affects other Xorg sessions using the same output too.
+If the check confirms `/mnt/media` is not mounted, bind the temporary media
+there. Any existing files will be temporarily hidden by this, but not changed.
 
-Optionally, set the initial console/KMS mode in `/boot/firmware/cmdline.txt` as well. Back up the file first, preserve its single-line format and all unrelated arguments, and replace any existing argument for that connector rather than adding a duplicate:
-
-```text
-video=HDMI-A-1:1280x720@60D
+```sh
+sudo mkdir -p /mnt/media
+sudo mount --bind /tmp/media /mnt/media
+findmnt --mountpoint /mnt/media
+sudo -u easytv ls /mnt/media
 ```
 
-Kernel connector names differ from Xorg output names: `HDMI-A-1` normally selects HDMI0, and `HDMI-A-2` the second port. `D` forces digital output enabled even when the TV is off at boot. Older OS releases may use `/boot/cmdline.txt`. Boot-command-line changes require a reboot and do not replace the Xorg configuration above.
+Connect a USB keyboard to the Pi and start the service. Once the video 
+starts, use `PgUp` and `PgDown` on the keyboard to change channels.
 
-This changes HDMI output resolution, not source-video resolution or decoding cost. A 4K source can still play poorly at 720p output; use suitable media and verify playback on the actual Pi. EasyTV does not transcode media or modify the OS display configuration, and the installer leaves boot settings untouched.
-
-### Route audio to HDMI
-
-EasyTV leaves audio routing to Raspberry Pi OS and mpv. The installer cannot choose an HDMI port because it depends on which port your TV is plugged into. After installing EasyTV, use Raspberry Pi OS's audio selector to choose that port. Run this as your normal administrator account:
-
-```bash
-sudo env SUDO_USER=easytv raspi-config
+```sh
+sudo systemctl start easytv.service
 ```
 
-`SUDO_USER=easytv` tells `raspi-config` to save the ALSA default for the `easytv` service account, not your personal login. Do not run plain `sudo raspi-config` for this step: that can configure the wrong user's audio. The `easytv` account's home is `/var/lib/easytv`.
+After testing, stop the service and unmount the temporary media:
 
-In the menu, choose **System Options** → **Audio**. Raspberry Pi models with two HDMI ports show two HDMI audio devices (often named `vc4-hdmi-0` and `vc4-hdmi-1`); choose the one corresponding to the port connected to your TV. The names identify the Pi's HDMI outputs, not the TV or cable. If you are unsure which is connected, select one, finish the menu, restart EasyTV and test sound; if silent, repeat and select the other HDMI device.
-
-Restart EasyTV so mpv reopens audio using the selected OS output. This interrupts playback:
-
-```bash
-sudo systemctl restart easytv.service
-```
-
-If `raspi-config` reports that PulseAudio or PipeWire manages audio, use that audio server's output selector instead. EasyTV does not configure audio servers or control the TV's volume.
-
-### Check startup and playback logs
-
-Check service lifecycle messages and the application user's logs for the current boot:
-
-```bash
-systemctl status easytv.service --no-pager -l
-sudo journalctl -u easytv.service -b --no-pager -n 100
-sudo journalctl -b _UID="$(id -u easytv)" --no-pager -n 200
-```
-
-The PAM/logind X session can place EasyTV and mpv messages outside the service-unit journal filter. Do not rely on `-u easytv.service` alone when diagnosing playback. Follow application/session logs live while reproducing a failure:
-
-```bash
-sudo journalctl -b _UID="$(id -u easytv)" -f
-```
-
-For a recent failure, replace `-f` with `--since "10 minutes ago" --no-pager`. To inspect the previous boot, replace `-b` with `-b -1` (if that boot's journal was retained). Capture logs before restarting so the failure's context is preserved.
-
-Playback transition logs include startup, channel commit, file advancement, retry scheduling, recovery, and CEC stop reasons, with channel/file context. Position updates and ordinary CEC traffic are not logged individually.
-
-### Audio responsibility
-
-EasyTV lets mpv select its audio backend/device. Volume and mute requests only send mpv IPC commands; EasyTV does not change OS or TV volume, select an audio route, or repair sound configuration. Installing mpv alone does not guarantee audible playback: the OS's audio setup and the `easytv` user's device/session access must already work. Diagnose silent playback or ineffective volume controls with mpv and Raspberry Pi OS, outside EasyTV.
-
-mpv is launched with `--no-config`, so ordinary mpv configuration files are not loaded. Volume/mute changes apply to the current player and are not retained across player replacement.
-
-### Stop and uninstall
-
-```bash
+```sh
 sudo systemctl stop easytv.service
-sudo make uninstall
+sudo umount /mnt/media
 ```
 
-The scripts can also be run with `sudo bash scripts/install.sh` or `sudo bash scripts/uninstall.sh`. Uninstall stops/disables the service and removes the installed binary/base unit. It preserves media, `/var/lib/easytv`, the account/groups, runtime prerequisite packages, and local systemd overrides. Reboot to restore the normal `tty1` login. Neither installation nor uninstallation requires running the Go compiler as root.
+The test files can be removed from `/tmp` if no longer needed.
 
-## Media and catalog
+There are several ways to configure real media for local playback:
 
-Each non-hidden immediate child directory of a media root is a channel. Recognized media files are collected recursively and sorted; hidden entries, symbolic-link entries, and empty channels are skipped.
+* copy real media to channel subdirectories under `/mnt/media`
+* copy real media to channel subdirectories elsewhere and change `systemd/easytv.service` to play them instead of `/mnt/media` and redeploy
+* copy real media to channel subdirectories elsewhere and mount that location as `/mnt/media` in `/etc/fstab`
 
-```text
-media-root/
-  Movies/
-    first.mp4
-    archive/second.mkv
-  Scrapbook/
-    photo.jpg
-  .inbox/
+See the next section to configure playback from a network SMB share.
+
+# Mount a SMB share as a media root
+
+To play media from a LAN-hosted SMB share, configure */mnt/media* as
+a read-only mount point using a root-owned credentials file:
+
+``` sh
+sudo apt install -y cifs-utils
+sudo mkdir -p /mnt/media
+sudo nano /root/.smbcredentials
 ```
 
-Pass the root, not each channel, as the positional argument. Multiple roots are supported. Absolute media/channel paths are persistent identities; moving files or changing roots can affect resume.
+Enter the domain and credentials:
 
-`--scan` rebuilds the catalog using the supplied roots: include every root you want retained. Without it, existing cached roots are reused and missing roots are scanned. Cached roots are not automatically refreshed when files appear.
-
-### Rescan after changing media
-
-After adding, removing, or moving media, SSH into the Pi and request a live rescan:
-
-```bash
-curl --fail-with-body -i -X POST http://127.0.0.1:8080/rescan
-journalctl -u easytv.service -b --no-pager -n 100
+```sh
+username=USERNAME
+password=PASSWORD
+domain=WORKGROUP
 ```
 
-HTTP must be enabled (`--listen=127.0.0.1:8080` in the supplied service). No request body or media-root arguments are needed: the scan uses all roots configured on the running instance.
+Set the file mode and configure `/etc/fstab`:
 
-The filesystem scan runs in the background while playback and controls continue. After a successful scan, the playback owner cancels pending channel previews/preparation, stops its current player, installs the refreshed catalog, and resumes from the latest known position **only if playback was running when the result was applied**. Playback stopped by CEC, including a source switch or standby, stays stopped. Rescanning does not claim Active Source or wake the TV, and it does not restart X or CEC.
-
-If the selected channel was removed, EasyTV selects the next surviving channel from the previous catalog order, wrapping around; if none survive, it selects the first new channel. If the saved file was removed, playback starts with the channel's first remaining item. Failed preparation/start candidates are skipped; if a whole channel cannot start, the rescan tries the next channel once around the catalog. These playback failures are still reported, even if a fallback starts successfully.
-
-The request waits for the scan and application of the result. HTTP 204 means success; 409 means another rescan is already in progress. Scan errors, an entirely empty library, and catalog-save failures return 500 without replacing the live catalog or stopping playback. Playback/state-save failures also return 500 and are logged; the new catalog may already be installed, so inspect the logs rather than assuming failure means nothing changed. An accepted rescan continues if its HTTP client disconnects; application shutdown cancels and joins the worker.
-
-Alternatively, restart the service to rescan:
-
-```bash
-sudo systemctl restart easytv.service
-systemctl status easytv.service --no-pager
-journalctl -u easytv.service -b --no-pager -n 100
+```sh
+sudo chmod 600 /root/.smbcredentials
+sudo nano /etc/fstab
 ```
 
-The supplied service includes `--scan`, so every service start (including boot and restart) rebuilds the catalog from its configured media roots. If you removed that flag in a local service customization, restore it before using restart to rescan. There is no periodic background scan.
+Append one new line to `/etc/fstab`, replacing `TRUENAS`, `media`, and
+`USERNAME` with the NAS hostname, share name, and Pi account username:
 
-Restart briefly interrupts playback and restarts the X session. EasyTV saves its known playback position during orderly shutdown, then attempts to restore playback using the rebuilt catalog. If the saved channel no longer exists, it selects the first remaining channel. If the saved file no longer exists in that channel, it starts from the first catalog item; failed preparation/start candidates are skipped. With no playable channels, startup fails and reports an error.
-
-Do not run a second EasyTV instance against the service's state directory to force a scan. The running application keeps its catalog in memory; changing the catalog file externally does not refresh it. Use `/rescan` or a service restart. Finish copying media before requesting a scan; scanning is not a filesystem snapshot and cannot prevent files from changing afterward.
-
-## Isolated headless smoke run
-
-After building, this example creates a tiny WAV and private state/workspace, runs for five seconds, and removes only its scratch directory. It starts real mpv, but no CEC, HTTP listener, real audio/video output, or overlay.
-
-```bash
-bash <<'EASYTV_HEADLESS'
-set -euo pipefail
-umask 077
-work="$(mktemp -d /tmp/easytv-doc-example.XXXXXX)"
-trap 'rm -rf -- "$work"' EXIT
-mkdir -p "$work/media/Sample"
-python3 - "$work/media/Sample/silence.wav" <<'PY_MEDIA'
-import sys, wave
-with wave.open(sys.argv[1], 'wb') as stream:
-    stream.setnchannels(1)
-    stream.setsampwidth(2)
-    stream.setframerate(8000)
-    stream.writeframes(bytes(8000 * 2 * 3))
-PY_MEDIA
-./bin/easytv --headless \
-  --state-dir "$work/state" --temp-dir "$work/tmp" \
-  --scan --run-for 5s "$work/media"
-EASYTV_HEADLESS
+```sh
+//TRUENAS/media  /mnt/media  cifs  credentials=/root/.smbcredentials,iocharset=utf8,uid=USERNAME,gid=USERNAME,file_mode=0444,dir_mode=0555,ro,nofail,x-systemd.automount,_netdev  0  0
 ```
 
-## CLI options
+Mount the share, list its contents, and make sure it is read-only.
+Confirm that the output matches the SMB share and includes `ro` 
+in the mount options. No matching entry means the check failed; resolve the
+mount issue before starting easytv.
 
-One or more media roots are required. Both storage flags are required; the program does not automatically choose the legacy state directory.
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--headless` | false | Null mpv audio/video outputs; CEC disabled unless a device is supplied. |
-| `--cec-device` | empty | Optional Linux CEC device; omit to disable CEC independently of video output. Supplying it in headless mode still enables physical CEC. |
-| `--osd` | false | Enable owned `aosd_cat` channel previews; incompatible with headless mode. |
-| `--listen` | empty | Optional HTTP bind address, for example `127.0.0.1:8080`; empty disables HTTP. |
-| `--scan` | false | Rebuild catalog from supplied roots. |
-| `--state-dir` | empty, required | Directory containing `state.json` and `catalog.json`. |
-| `--temp-dir` | empty, required | Parent of the runtime's private preparation workspace. |
-| `--run-for` | zero/unbounded | Optional bounded duration, such as `30s`; negative values rejected. |
-
-For hardware-free headless use, omit `--cec-device` entirely. Hardware mpv arguments select fullscreen output and leave audio-backend/device selection to mpv; there is no CLI audio-device selector. `--temp-dir` does not relocate every temporary file: the player also owns an IPC/log directory under `/tmp`.
-
-Visible playback also works without CEC: omit `--cec-device` in an authorized X session. Channel changes still work, but cannot select the TV input, and TV standby/source-away monitoring is disabled. `/power` and `/active-source` return HTTP 503 without CEC. The supplied appliance service continues to enable CEC explicitly.
-
-## Playback and persistence
-
-- Startup restores the saved channel if available, otherwise the first active channel, and attempts playback automatically. Readiness does not prove the TV is awake, selected, or visibly rendering.
-- Successful starts persist the selected channel and actual original media path, including fallback after failed candidates. Prepared temporary image paths are not stored as media identities.
-- Position observations apply a three-second audio/video resume rewind. The Go implementation retains the restored offset until the next observation rather than copying the reference's initial zero reset. Images remain at zero.
-- Image advancement waits for both a ten-second timer and completed next-item preparation; preparation can extend the interval.
-- Save failures are reported without stopping a successfully started player. A switch can continue after a save failure if the old child stopped. A child-stop failure blocks replacement.
-- Unexpected IPC loss cancels pending work, persists known position, and stops/reaps the player. It does not manufacture EOF or automatically restart/reclaim input. A later explicit channel request can restart playback.
-- Use foreground Ctrl-C or SIGTERM to the exact EasyTV instance for orderly shutdown. Application exit does not send TV standby.
-
-Never share a writable state directory between simultaneous instances or between Go and legacy applications. Use fresh paths for acceptance and back up legacy state before migration. Invalid state/cache is reported rather than silently replaced with defaults.
-
-### Disconnected or unavailable media
-
-If mpv reports a media failure, EasyTV stops that player, saves the latest known position, and stays on the selected channel. With overlays enabled it shows, for example, `I Love Lucy: playback unavailable. Retrying...`; the message uses the normal five-second overlay duration and is refreshed between attempts. Without overlays it is logged as a channel-preview diagnostic.
-
-Recovery retries the **same saved file and position**, waiting ten seconds after each failed attempt. Attempts run in a background worker, never overlap, and do not claim Active Source or change channels. Recovery does not skip to another file simply because the saved file is missing. Once that file is available and mpv loads it, playback resumes. If ordinary end-of-file advancement cannot start any candidate, the last played file/position is retained for recovery.
-
-A channel request cancels the old recovery sequence; the newly selected channel gets its own normal startup attempt. CEC standby/source-away, explicit stop, successful live rescan, and application shutdown also cancel and join recovery. After a successful rescan while stopped, playback stays stopped: send a channel request to resume with the refreshed catalog. A failed rescan leaves the existing recovery sequence intact. There is no periodic catalog scan.
-
-Startup now requires mpv to report `file-loaded`, not merely expose an IPC socket, before EasyTV persists a successful start. Media loading has a five-second timeout; failed attempts are reaped before another begins. Fallback to a different file during normal startup begins at offset zero, not at another file's resume position.
-
-Filesystem disconnection behavior still depends on the OS/filesystem: a blocked kernel read, stuck network mount, or image copy may not be promptly interruptible. Configure mount/network timeouts appropriately. EasyTV cannot guarantee immediate cancellation of uninterruptible OS I/O, and does not infer a disconnection merely because playback position stops moving.
-
-## HTTP controls
-
-HTTP is disabled unless `--listen` is supplied. There is no built-in authentication or TLS. Use loopback for initial acceptance; do not expose unauthenticated controls to an untrusted network.
-
-| Method | Path | Request / result |
-| --- | --- | --- |
-| `GET` | `/status` | Local playback status JSON; does not query or infer TV state. |
-| `POST` | `/channel` | JSON `{"direction":"next"}` or `{"direction":"previous"}`. |
-| `POST` | `/volume` | JSON `{"volume":50}`; finite numeric range 0 through 100. |
-| `POST` | `/volume/adjust` | JSON `{"delta":5}`; delta -100 through 100, resulting mpv volume clamped to 0 through 100. |
-| `POST` | `/mute` | JSON `{"muted":true}` or `{"muted":false}`. |
-| `POST` | `/mute/toggle` | No body required; toggle the current mpv mute property. |
-| `POST` | `/rescan` | No body; refresh configured media roots and apply the result before returning 204. Concurrent rescan: 409; failures: 500. |
-| `POST` | `/power` | JSON `{"state":"on"}` or `{"state":"off"}`; requires CEC. |
-| `POST` | `/active-source` | No body required; explicit CEC Active Source assertion. |
-
-Successful controls return HTTP 204. Channel success acknowledges queued work and channel-name feedback submission, not CEC transmission or the delayed playback commit. Rapid requests move the pending selection and reset its two-second delay. Wrapping to the current channel does not restart an already-running player.
-
-After EasyTV observes another device become Active Source, the first previous/next request claims the Pi input and resumes the existing channel without advancing it. Further requests, including rapid presses while that return is pending, change channels normally. A failed return claim can be retried without advancing. This applies to both the remote and HTTP channel controls, and requires an observed source-away event: stopped playback alone is not evidence that another input is active. TV standby, explicit stop, or an explicit TV selection of the Pi clears this source-return behavior.
-
-Channel-name feedback runs independently of CEC transmission and player startup. One bounded worker sends Active Source claims in request order; queue overflow is an explicit HTTP error and leaves the preview unchanged. Playback commits only after the latest preview's claim succeeds and its two-second delay has elapsed. A failed latest claim clears that preview and is reported asynchronously in the application log and `/status`'s `last_error`; a failed older claim is logged but cannot clear newer feedback. Stop, standby/source-away, rescan, and shutdown invalidate queued claims as well as previews; a transmission already in progress cannot be recalled. CEC receive polls are bounded to 50 ms. Input switching, overlay rendering and media startup can still add time, and an overlay cannot be seen while the TV is displaying another input.
-
-Normal operation logs playback transitions and errors; remote key dispatch and HTTP acceptance timings are debug-level diagnostics. Use the remote's `--test` mode below for detailed channel input logging and direct visual feedback. A playback-commit log is not a count of button presses, because successive requests reset the preview timer.
-
-Stop and CEC policy decisions take effect when the playback owner accepts and processes them; a request canceled before acceptance does not alter pending feedback. A synchronous player operation already underway can delay that processing. Channel feedback remains independently responsive during those operations.
-
-Check playback without changing it:
-
-```bash
-curl --fail-with-body http://127.0.0.1:8080/status
-```
-
-The response contains `channel_id`, `file_path`, `playback` (`playing`, `stopped`, or `retrying`), `position_seconds` (the latest known resume offset, including the normal rewind), `pending_channel_id`, `last_error`, and `next_retry_at` (UTC timestamp or null). Empty strings mean no known value. During an active retry attempt there is no scheduled next retry, so `next_retry_at` is null. `last_error` retains the most recent playback failure even after recovery; it is not necessarily a current fault. Playing means the local player is running, not proof the TV is displaying it. Status is read through the serialized playback owner; slow synchronous operations can delay it.
-
-Volume/mute change the current mpv instance, not TV hardware volume, and require running playback. They are not persisted state fields; do not assume they survive player replacement.
-
-Power and Active Source endpoints are CEC commands, not local playback start/stop endpoints. Power-on and Active Source assertion do not themselves resume stopped playback. Power-off sends broadcast STANDBY, not a TV-only directed command, and is not an atomic local playback stop. Command success is not confirmation of the TV's eventual state.
-
-Examples against a loopback runtime you deliberately started (POSTs change playback):
-
-```bash
-curl --fail-with-body -i -H 'Content-Type: application/json' \
-  -d '{"direction":"next"}' http://127.0.0.1:8080/channel
-curl --fail-with-body -i -H 'Content-Type: application/json' \
-  -d '{"volume":50}' http://127.0.0.1:8080/volume
-curl --fail-with-body -i -H 'Content-Type: application/json' \
-  -d '{"muted":false}' http://127.0.0.1:8080/mute
-```
-
-## Keyboard/FLIRC REST bridge
-
-The executable `scripts/easytv-remote.exs` script reads Linux input events and calls the running Go application's HTTP API. It does not launch a player, manage channels, control OS volume, or open CEC.
-
-`sudo make install` deploys both services and installs Elixir/build prerequisites. The script has an Elixir shebang and uses `Mix.install` internally; it is not a Mix project or release. The installer runs its `--prepare` mode as `easytv` to populate the dependency cache under `/var/lib/easytv` without opening input devices. Normal service startup reuses that cache. Removing the cache, changing dependency declarations, or upgrading Elixir can require preparing it again with download access.
-
-The installed editable script is `/etc/easytv/easytv-remote.exs`; reinstall preserves it. A fresh shipped copy is updated at `/usr/local/lib/easytv/easytv-remote.exs` for comparison. After editing the installed script, restart `easytv-remote.service`; dependency changes may require preparing its cache first:
-
-```bash
-(cd /tmp && sudo -u easytv env HOME=/var/lib/easytv /etc/easytv/easytv-remote.exs --prepare)
-```
-
-`Mix.install` needs a working directory accessible to `easytv`; setting `HOME` alone does not change it. The installer prepares dependencies from `/var/lib/easytv`, so your checkout can remain private. Uninstall removes both base units, the shipped script and installed udev rule, but preserves `/etc/easytv`, cached dependencies/state and local unit overrides.
-
-Starting, stopping, and restarting `easytv.service` also manages `easytv-remote.service`. The remote restarts independently on failure, so an unplugged remote does not restart video playback. The companion is pulled in by the main service; it needs no separate enable command. Keep HTTP enabled and adjust the remote URL if changing the main listener.
-
-### Find and select the remote keyboard
-
-List stable keyboard paths and inspect the candidate's identity:
-
-```bash
-ls -l /dev/input/by-id/*-event-kbd
-udevadm info --query=property --name=/dev/input/by-id/YOUR_REMOTE-event-kbd
-```
-
-Look for `ID_MODEL`, `ID_SERIAL`, `ID_VENDOR_ID`, `ID_MODEL_ID`, and `ID_INPUT_KEYBOARD=1`. Compare the listing before/after unplugging the remote if its name is unclear. The tested FLIRC reports `ID_VENDOR_ID=20a0` and `ID_MODEL_ID=0006`; the installer grants the `easytv` group read access only to keyboard event nodes with those USB IDs. Other keyboards are not granted access. For another remote, create a local udev rule matching its verified vendor/product (and serial if needed) rather than broadening permissions to all input devices, reload rules, and reconnect the device.
-
-The script accepts one or more device paths as positional command-line arguments. To select the remote explicitly for deployment:
-
-```bash
-sudo systemctl edit easytv-remote.service
-```
-
-```ini
-[Service]
-ExecStart=
-ExecStart=/etc/easytv/easytv-remote.exs --url http://127.0.0.1:8080 /dev/input/by-id/YOUR_REMOTE-event-kbd
-```
-
-Apply with `sudo systemctl daemon-reload` and `sudo systemctl restart easytv.service` (interrupts playback), or restart only `easytv-remote.service` if EasyTV is already running. Check access with `sudo -u easytv test -r /dev/input/by-id/YOUR_REMOTE-event-kbd`. Remote logs are available with `journalctl -u easytv-remote.service -b --no-pager -n 100` or `-f` to follow live.
-
-For manual use from the checkout, after stopping the companion to avoid duplicate requests:
-
-```bash
-./scripts/easytv-remote.exs --url http://127.0.0.1:8080 \
-  /dev/input/by-id/YOUR_REMOTE-event-kbd
-```
-
-The invoking user needs read permission on the chosen input device. Configure narrowly scoped device permissions for the remote rather than running the bridge as root or making all input devices world-readable. Broad `input` group access can expose every keyboard's keystrokes. Without explicit paths the script watches all `/dev/input/by-id/*-event-kbd` devices; it deliberately does not fall back to every event device. Devices are selected at startup; restart the bridge after reconnecting a remote if necessary.
-
-| Key | Action |
-| --- | --- |
-| Page Up / Page Down | Previous / next channel through EasyTV, including its preview and CEC policy. |
-| Minus / keypad minus | No-op volume-down stub; the remote controls TV volume directly. |
-| Equal / plus / keypad plus | No-op volume-up stub; the remote controls TV volume directly. |
-| M | No-op mute stub; the remote controls TV mute directly. |
-| Space | No-op power stub; the remote already controls the TV directly. |
-| Q | Ignored; no quit behavior. |
-
-Only key-down events are handled; releases and auto-repeat are ignored. The bridge sends REST requests only for channel changes; power, volume, and mute stubs send nothing to avoid doubling the remote's direct TV controls. The mpv volume/mute REST endpoints remain available to other clients. HTTP failures/timeouts are logged; requests are not automatically retried because repeating a channel step could change the intended selection. Ctrl-C stops only the bridge, not EasyTV. Keep the unauthenticated API on loopback or use a separately secured connection.
-
-### Test remote input without REST
-
-Run the same Elixir script with `--test` to log channel key-down/repeat/release events and show numbered `REMOTE TEST` overlays directly through asynchronously launched `aosd_cat` ports. Each channel key-down replaces the previous overlay; repeats/releases are logged but do not advance the count. No REST requests are sent. Test mode exclusively grabs the selected input devices so the normal remote service cannot also act on these presses; exiting releases them. No Go service changes or restarts are needed.
-
-```bash
-sudo install -m 0755 scripts/easytv-remote.exs \
-  /usr/local/lib/easytv/easytv-remote.exs
-
-# Use an accessible working directory for Mix.install as the easytv user.
-cd /tmp
-sudo -u easytv env HOME=/var/lib/easytv DISPLAY=:0 \
-  XAUTHORITY=/run/easytv/Xauthority \
-  /usr/local/lib/easytv/easytv-remote.exs --test /dev/input/by-id/YOUR_REMOTE-event-kbd
-```
-
-Run the install command from the project root before changing directory. This updates only the shipped copy, not the service's editable script. Use the actual device path and the running X display's authority file. `aosd_cat` and access to that display are required. Stop with Ctrl-C (then `a` if Erlang presents its break menu). The flag is also available in the installed editable script after explicitly updating that copy; reinstall preserves it.
-
-For testing through systemd, add `DISPLAY=:0` and `XAUTHORITY=/run/easytv/Xauthority` environment entries and override `ExecStart` to run the installed script with `--test` and the selected device. Keep `WorkingDirectory=/var/lib/easytv`. Reload systemd and restart only `easytv-remote.service`. Test mode persists across restarts until that override is removed. If using a dedicated `test.conf` drop-in, restore normal REST operation with:
-
-```bash
-sudo rm /etc/systemd/system/easytv-remote.service.d/test.conf
+```console
 sudo systemctl daemon-reload
-sudo systemctl restart easytv-remote.service
+sudo mount -a
+sudo -u easytv ls /mnt/media
+findmnt -rn -t cifs --mountpoint /mnt/media -o TARGET,SOURCE,FSTYPE,OPTIONS
 ```
 
-Remove only the test-specific override, not other local settings. Follow input and HTTP logs with `journalctl -u easytv-remote.service -f`.
+Restart the service and configure it to start automatically on boot:
 
-Bridge tests do not open input devices or download dependencies:
-
-```bash
-elixir tests/easytv_remote_test.exs
+```sh
+sudo systemctl start easytv.service
+sudo systemctl enable easytv.service
+sudo systemctl status easytv.service
 ```
 
-## CEC policy
+## Configure and Update from Source
 
-The internal CEC service owns adapter access exclusively and reads current kernel logical/physical addresses for commands and received-observation evaluation. It passes each received packet with its current adapter metadata directly to the playback owner. Bus monitoring remains active even when HTTP is disabled; it does not require public event streams or a separate CEC server.
+Edit configuration in the checkout:
 
-Applicable observations of another Active Source, TV-reported standby/transition to standby, or TV standby addressed to the appliance/broadcast stop playback. Malformed, unrelated, or insufficient-identity observations do not establish source loss. A valid TV-originated broadcast `SET_STREAM_PATH` matching the adapter's current physical address resumes the selected channel from saved playback state. Duplicate selections do not restart an already-running player. This resumes local playback without sending Active Source or power commands; other routing messages do not trigger resume. There is no repeated input-seizing loop or inferred TV-state `/status` endpoint.
+* `priv/easytv.config.exs` for keyboard mappings and CEC behavior.
+* `systemd/easytv.service` for media paths and startup arguments.
+* `systemd/70-easytv-remote.rules` for keyboard permissions, if needed.
 
-Turning the TV back on resumes playback automatically only if the TV explicitly selects the Pi with `SET_STREAM_PATH`. Power-on reports alone do not resume playback or seize the input from another device. TVs that do not send this selection message still require a channel-button press to claim the Pi input and resume; switching to another input first is not required. Unrelated CEC traffic during wake-up must not cancel that pending channel request.
+Rebuild and deploy:
 
-HTTP exposes only the CEC actions `/power` and `/active-source`, alongside playback controls. The former `/adapter`, `/events`, and `/events.ndjson` endpoints and metadata-only `--device-name` option have been removed. Adapter information and received packets remain internal. Kernel adapter diagnostics/loss notices are logged; see [Check startup and playback logs](#check-startup-and-playback-logs).
-
-Interrupted CEC readiness, event-dequeue, and receive calls yield to the service loop and are polled again rather than ending playback. Genuine adapter errors and internal queue overflow remain explicit runtime failures. Transmit calls are not blindly retried, which could duplicate a command already queued by the kernel. Kernel packet loss cannot be recovered here.
-
-## Tests and operational limits
-
-### Runnable soak tests
-
-Run from the checkout after `make build`. Both scripts require Python 3 and Linux, have bounded durations, return nonzero on failure/interruption, and print the report directory. Reports contain `summary.json` and timestamped `events.jsonl` samples/actions. Use `--output /path/to/new-directory` to choose a new report directory; otherwise a private directory under `/tmp` is retained. Reports can include media paths and logs; keep them private.
-
-The isolated player soak never connects to the installed service or opens CEC hardware:
-
-```bash
-./scripts/soak-player.sh --duration 1h
-# If Go is not on PATH:
-./scripts/soak-player.sh --duration 1h --go /path/to/go
+```sh
+mix test
+MIX_ENV=prod mix release --overwrite
+bash scripts/install.sh --check
+sudo bash scripts/install.sh
+sudo systemctl start easytv.service
 ```
 
-Prerequisites: the Go toolchain used to build EasyTV, `mpv`, `ffmpeg`, `libvips-tools`, and Python 3. Install missing fixture tools with `sudo apt install ffmpeg libvips-tools python3`. It first runs focused real-mpv integration scenarios with mock CEC for standby/source-away, recovery/cancellation, missing files, and live rescans; output is saved in `scenarios.log`. It then generates short WAV/video/image fixtures and invalid media in a private temporary workspace and launches `bin/easytv` with null audio/video, no CEC, isolated state, and a dynamically allocated loopback HTTP port.
+The installer validates the release and config, stops playback, and replaces
+installed files. Playback state is preserved. Installation leaves the service
+stopped and does not change boot enablement.
 
-The sustained run exercises missing-file startup fallback, rescan, file advancement and channel switching, checks `/status`, and samples player memory, file descriptors, direct children, and workspace entries. After warmup, growth above 32 descriptors or 128 MiB RSS fails the run; more than four direct children or 100 workspace entries also fails. These are coarse leak guards, not guarantees of flat memory use. Expected invalid-media errors are retained in `player.log`; they do not themselves fail the run. The test stops its own player and removes its fixture/state workspace even on failure. Reports remain. Setup, focused scenarios, and cleanup add time beyond `--duration`.
+Edit checkout files rather than installed copies: installation replaces them,
+and integrity checks reject locally modified installed files. If deployment
+fails, leave the service stopped and resolve the reported error before retrying.
+The read-only --check does not verify actual playback, display, audio, or input.
 
-The appliance soak uses the running service's actual media and display:
+## Uninstalling
 
-```bash
-./scripts/soak-appliance.sh --duration 8h
+Uninstall stops/disables easytv, removes the managed release, config, unit,
+input rule, and manifest, and restores the tty1 console login. Media, saved
+state, the service account, prerequisite packages, and cecmond are retained.
+The source checkout is not removed.
+
+```sh
+bash scripts/uninstall.sh --check
+sudo bash scripts/uninstall.sh
 ```
 
-**Running this script authorizes real channel changes and, with CEC enabled, input selection.** It does not modify media, install anything, restart the service, or send power commands. It updates normal playback state through channel requests. The default target is `http://127.0.0.1:8080`; use `--url` and `--service` only to select the intended HTTP service and local systemd unit. Unit checks apply to the local machine, so a remote URL does not monitor that remote service's lifecycle.
+## Configure EZclicker Remote
 
-The appliance run requires working `/status`, `systemctl`, and `journalctl`. It fails on HTTP errors/timeouts, non-playing status, a changed last playback error, a stuck preview, or a service PID/restart/state change. Existing historical errors are recorded rather than treated as new failures. It saves a bounded current-boot application-user journal excerpt at completion; journal-access failures are recorded as warnings. It does not measure renderer smoothness, audio quality, or appliance process-resource growth.
+Follow manufacturer instructions to configure the remote to control the
+TV's power and volume. The TV should ignore the Channel buttons when connected
+to an HDMI source.
 
-#### Run overnight and inspect logs
+## Configure FLIRC
 
-To run independently of your SSH connection, start a transient user service from the checkout:
+Use [FLIRC](https://flirc.tv/)'s configuration software to map the IR signals 
+from the remote's Channel buttons to the PgUp and PgDown keyboard keys.
 
-```bash
-cd ~/easytv
-systemd-run --user --unit=easytv-soak --collect \
-  --working-directory="$PWD" \
-  "$PWD/scripts/soak-appliance.sh" --duration 8h
+## Development
+
+* soak test
+* APIs for easytv, mpv, and cecmond
+* user script
+* flattened state machine
+
+## Logging
+
+# References
+
+* https://github.com/danya02/babooshka-tv
+* https://github.com/cwilliamsbiz/DadTV
+* https://github.com/shane-mason/FieldStation42
+* https://github.com/ErsatzTV
+
+---
+---
+---
+---
+---
+---
+---
+---
+---
+
+
+
+### Direct application actions
+
+`EasyTV.Controls` exposes `channel_next/0`, `channel_previous/0`, `stop/0`,
+and `resume/0` for in-process callers. Actions are asynchronous:
+`:ok` means sent, not completed. Calling while the input process is absent
+logs an error and returns `{:error, :not_running}`.
+
+Channel actions retain the two-second preview delay. Stop cancels the pending preview, clears OSD, saves the playback
+position, clears prepared-next tracking, and requests mpv stop without waiting
+for the player to exit. Resume restores the current channel only when no
+player is active. Keyboard channel events use the same action handlers.
+Keyboard actions are selected by the user configuration described below.
+
+### User configuration
+
+Edit `priv/easytv.config.exs` in the checkout, then rebuild the release. It is
+packaged with the application and loaded at startup. Alternatively, select an
+external file explicitly:
+
+```sh
+mix easytv --config ./priv/easytv.config.exs --scan /mnt/media/
+_build/prod/rel/easytv/bin/play --config /etc/easytv/config.exs /mnt/media/
 ```
 
-Check `loginctl show-user "$USER" -p Linger`. If it reports `Linger=no`, enable lingering with `sudo loginctl enable-linger "$USER"` so the user manager survives logout. This also allows your other enabled user services to run without a login; undo later with `sudo loginctl disable-linger "$USER"` if desired.
+The script defines `EasyTV.UserConfig.config/0`, returning a keyword list with
+`:state`, `:on_key`, `:on_cec`, and `:on_mpv`. All callbacks receive `(event, state)` and
+return the next state. State may be any Elixir term and is shared between all
+callbacks; it is not persisted across application restarts.
 
-Check the runner and its startup/completion output:
+Key callbacks receive individual `{:ev_key, key, value}` events, including
+releases and repeats, as well as other Linux input events. The sample acts only
+on key-down (`value == 1`), preserving the original mappings. Put catch-all
+clauses last to log unmatched events and state. The CEC callback is registered,
+and receives interpreted CEC observations when `--cec-url` is enabled.
 
-```bash
-systemctl --user status easytv-soak.service --no-pager -l
-journalctl --user -u easytv-soak.service -f
+`EasyTV.Controls.send_mpv_command/1` accepts an mpv command list, such as
+`["get_property", "volume"]` or `["add", "volume", 5]`, and returns `{:ok, ref}`
+after dispatch. Invalid commands return `{:error, :invalid_command}`; an absent
+playback owner returns `{:error, :not_running}`. These failures are logged.
+Each dispatched command produces one `on_mpv/2` result during the session:
+
+```elixir
+%{type: :reply, ref: ref, command: ["get_property", "volume"],
+  result: {:ok, %{"error" => "success", "data" => 50}}}
 ```
 
-Some Raspberry Pi OS installations do not have a separate user journal and report `No journal files were found`. That does not mean the soak failed. Read the user-unit messages from the system journal instead (add `sudo` if access is denied):
+Failures use `result: {:error, reason}`: an mpv error string, `:no_player`,
+`:player_stopping`, `:player_replaced`, `:player_exited`, `:timeout`, or an IPC
+failure reason. Store the reference in script state to correlate a later result
+and send follow-up commands. Callback execution is serial, so results are handled
+after the initiating callback returns its updated state.
 
-```bash
-journalctl -b _SYSTEMD_USER_UNIT=easytv-soak.service --no-pager -n 100
-journalctl -b _SYSTEMD_USER_UNIT=easytv-soak.service -f
+Commands target the current player when the playback owner processes them.
+They are not coalesced, retried, or carried over to a replacement player.
+Outstanding requests are cancelled when playback stops or changes; commands
+time out if no reply arrives. Internal position polls and unsolicited mpv events
+are not delivered to this callback. Commands such as `loadfile` and `quit` can
+interfere with managed playback; command policy belongs to the script.
+
+Callbacks execute serially in a separate process, not in the playback or
+preview process. Action APIs remain asynchronous. A slow callback or breakpoint
+delays subsequent callbacks, but playback and preview timers continue. Pending
+events can accumulate during a pause; this is not a whole-appliance pause.
+Callback exceptions are logged with event/state and terminate the application,
+rather than silently resetting the user's state. Missing or invalid scripts
+fail startup. Config files are trusted executable code; do not load untrusted
+files or call `Mix.install` inside them.
+
+For VS Code debugging, install ElixirLS and use "Debug EasyTV config" from
+`.vscode/launch.json`. Adjust the media directory and display environment for
+your machine. The `requireFiles` entry loads the config module before the Mix
+task, allowing breakpoints in its callback functions. If using another config,
+change both `taskArgs` and `requireFiles`. Editing the script requires restarting
+the application/debug session; hot reload is not supported.
+
+### cecmond connection
+
+Enable the optional connection to the separately installed daemon:
+
+```sh
+mix easytv --cec-url http://127.0.0.1:8080 /mnt/media/
 ```
 
-The runner prints its report directory at startup. Substitute that exact directory below; do not assume the random suffix is the same on another run:
+EasyTV subscribes to `/events.ndjson` and passes interpreted observations to `on_cec/2`.
+Keepalives are ignored. Disconnects, malformed records, and idle timeouts are
+logged and delivered as `%{type: :observation_gap, reason: reason}`; the client
+reconnects after two seconds without a replay token.
 
-```bash
-REPORT=/tmp/easytv-soak-report-REPLACE_WITH_YOUR_RUN
-tail -f "$REPORT/events.jsonl"
-# After completion or failure:
-cat "$REPORT/summary.json"
-tail -n 100 "$REPORT/journal.log"
+`EasyTV.Controls.send_cec_command/1` accepts a map, encodes it as JSON, and
+asynchronously posts it to cecmond's `/commands` endpoint. The sample config's
+`assert_active_source/0` helper sends `%{command: "active_source"}` when CEC
+is enabled.
+`{:ok, ref}` means dispatched, not transmitted; the HTTP result is logged.
+The reference is reserved for future correlation; no completion callback is
+currently delivered for CEC commands.
+Each call sends independently, without coalescing or automatic retry.
+HTTP 429 and uncertain outcomes are reported, not silently retried.
+Non-map or non-JSON-encodable payloads are logged and return `{:error, :invalid_command}`.
+Without `--cec-url`, calling this API logs an error and returns
+`{:error, :not_running}`. Channel changes no longer invoke `cec-client` or
+assert AS implicitly; the config decides when to request it.
+
+The stream waits for each CEC callback to finish before requesting another HTTP
+chunk. There is no callback deadline, so debugger pauses are allowed. During a
+long pause, cecmond may disconnect a slow subscription; after continuing, EasyTV
+reports the interruption and reconnects. Observations are live and cannot be
+replayed. Network I/O runs outside playback and the callback dispatcher.
+Use a local daemon; HTTPS connections verify certificates if explicitly used.
+
+### CEC policy in the sample config
+
+Observations have `:type`, `:packet`, and `:adapter` fields. Transport gaps have
+`:type` and `:reason` instead. Raw cecmond JSON is retained in `:packet`.
+Types include `:focus_lost`, `:focus_here`, `:tv_selected`, `:tv_standby`,
+`:observation_gap`, `:invalid_packet`, `:unhandled_packet`, and `:unhandled_event`.
+
+The interpreter checks received raw bytes, validation errors, and the packet's
+current adapter identity. Another device's valid broadcast Active Source means
+focus loss. TV-originated broadcast/addressed standby and standby power reports
+are recognized; unrelated devices' standby is ignored. Explicit TV
+`SET_STREAM_PATH` selecting our physical address means `:tv_selected`.
+Routing-away messages are not interpreted as focus loss in this version.
+
+The sample config stops on focus loss or TV standby. The first channel key
+after either resumes the current channel and requests AS without stepping.
+Later presses change channels. `:return_requested` means a request was made,
+not confirmed TV selection. Explicit TV selection resumes; repeated selection
+does not cancel a channel preview. Observation gaps leave playback unchanged
+and reset focus to unknown. Adapter loss and capture diagnostics are gaps, not
+proof that the TV is off. Edit the callback clauses to change these policies.
+
+Use cecmond's `/adapter` endpoint to inspect the TV connection. Do not run
+`cec-client` alongside cecmond: only cecmond should own the CEC adapter.
+Customize the callbacks in `priv/easytv.config.exs` for your equipment.
+
+# Deploy
+
+`systemd/easytv.service` describes the dedicated appliance deployment. Use the
+install scripts above; the unit is not installed by building the release alone.
+It expects:
+
+* The entire release at `/opt/easytv`.
+* The checkout's config copied to `/etc/easytv/config.exs`.
+* A non-login `easytv` account, with video/render/audio and keyboard read access.
+* Read access to `/mnt/media` and writable systemd-managed state/runtime paths.
+* Xorg, startx, mpv, vips, and aosd_cat installed on the host.
+
+The service owns X on tty1 using a logind/PAM session; it conflicts with the
+console getty while running. Do not also start EasyTV/X using console autologin
+or login startup scripts. X resolution and mpv audio
+configuration belong to the host/service account and are not changed by EasyTV.
+
+The service uses foreground playback and `Restart=on-failure`. Explicit
+`systemctl stop` does not restart it. cecmond is optional and is not started or
+stopped by EasyTV; add `--cec-url http://127.0.0.1:8080` to the unit's application
+arguments if using it. Edit the unit in the checkout before deployment.
+
+After installation:
+
+```sh
+sudo systemctl start easytv.service
+sudo systemctl stop easytv.service
+sudo systemctl restart easytv.service
+journalctl -u easytv.service -b --no-pager
 ```
 
-`events.jsonl` is the detailed live progress log; the runner's journal output is mainly startup and the final summary. Samples show local playback/resume position, pending selection, last error, and service identity/restart count. Advancing positions with `playing`, no new errors, and a stable PID/restart count are healthy signs, not proof of visible video/audio. Long quiet dwells between channel actions are intentional. `summary.json` is written only when the runner finishes; `journal.log` is captured at that time for appliance runs. Isolated runs instead include `player.log` and `scenarios.log`.
+## Lifecycle and shutdown
 
-Use the [application-user journal commands](#check-startup-and-playback-logs) for EasyTV/mpv errors; the soak-runner journal and EasyTV's journal are different logs. Ctrl-C while following logs stops only the log viewer. To stop the background soak:
+An OTP application supervisor owns a single runtime session. Input, config,
+playback, OSD, and background tasks are supervised together. A session failure
+stops the remaining children instead of restarting playback or resetting user
+focus state silently; the foreground command exits unsuccessfully.
 
-```bash
-systemctl --user stop easytv-soak.service
+On application shutdown, inputs/CEC streaming and the callback dispatcher stop
+before the playback owner. The owner saves the latest known position, clears
+transitions, stops preparation work, and waits for player cleanup; OSD and task
+supervisors then stop. Waiting is restricted to teardown: ordinary channel,
+stop/resume, and CEC command APIs remain asynchronous.
+
+SIGTERM requests Erlang's orderly shutdown.
+The unit's `ExecStop` signals the recorded playback VM and waits for it to exit
+before systemd tears down startx/X. This ordering matters because PAM/logind
+moves playback into a session scope, outside the service's control group, and
+xinit teardown alone does not guarantee a final state save.
+
+During development,
+Ctrl-C followed by `a` is an abrupt abort and does not guarantee a final state
+save. For orderly shutdown from IEx, use `System.stop()`. SIGKILL/power loss
+cannot run cleanup callbacks. The service also uses control-group cleanup, but session-scoped processes are
+not covered by that alone. Check shutdown logs and remaining `easytv` processes
+on the target host if graceful shutdown fails.
+
+Application logs may be attributed to the logind session rather than
+`easytv.service`. If `journalctl -u easytv.service` only shows startup, use
+`sudo journalctl _UID=$(id -u easytv) -n 60 --no-pager` for service-user logs.
+
+
+# Logs
+
+Production releases log at `info` level: startup, playback transitions, and
+user-config actions remain visible, along with warnings and errors. Detailed
+channel previews, OSD/process cleanup, input events, and position polling are
+debug diagnostics. Development (`mix easytv`) retains debug logging.
+
+``` sh
+sudo journalctl _UID=$(id -u easytv) -f
+sudo journalctl _UID=$(id -u easytv) --since "1 hour ago" --no-pager
 ```
 
-Stopping it normally writes an `INTERRUPTED` summary, not a pass. With `--collect`, the transient unit can disappear after exit; retained report files and journal entries are the source of the final result. Default reports under `/tmp` may be removed on reboot or by cleanup policies; use `--output` with a new private directory elsewhere if results must survive those events.
+For temporary production diagnostics, add `Logger.configure(level: :debug)`
+inside the user config's `config/0` function and redeploy. Remove it to restore
+normal logging.
 
-Both runners use a deterministic pattern: normal dwells alternate 45/90 seconds, every sixth action is a four-request burst 250 ms apart, and every tenth action is followed by a ten-minute dwell. Directions follow next/next/previous. `--interval 10s` changes the normal dwell base; long dwells remain ten minutes. Status is sampled about every two seconds, excluding request time. Short runs cannot cover every pattern or media ending. Ctrl-C stops the runner; appliance playback remains on its last selected channel.
+## Appliance soak test
 
-These are not a substitute for checking real picture/audio, TV standby, another device becoming active, or boot with the TV initially off. No public CEC feed is required.
+Run `scripts/soak.py` on the Pi against an already-running installed service.
+It requires Python 3 and root access to inject Linux input events. It writes
+PageUp/PageDown presses and releases to the existing FLIRC keyboard device;
+it does not install a synthetic device, grab input, or restart EasyTV.
 
-Runner smoke tests (no hardware):
-
-```bash
-python3 tests/soak_test.py
+```sh
+sudo python3 scripts/soak.py --duration 24h
+sudo python3 scripts/soak.py --duration 48h --steady 2h --changing 20m
+sudo python3 scripts/soak.py --duration 2m --steady 15s --changing 30s --skip-mute
 ```
-
-With real-integration opt-in variables unset:
-
-```bash
-GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off GOWORK=off \
-  go test -mod=readonly ./...
-```
-
-Ordinary tests include private fake-overlay helpers; opt-in real-mpv integration suites require explicit enabling and isolated media/state. They are not live-appliance acceptance commands.
-
-The Go entrypoint does not provide legacy evdev/FLIRC bindings, legacy shell hooks, or REST playback start/stop endpoints. Boot startup is provided separately by the installer/systemd unit. Complete target-device acceptance before replacing a live launcher.

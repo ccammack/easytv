@@ -1,1 +1,5 @@
-/bin/
+/_build/
+/deps/
+/tmp/
+/.easytv/
+/erl_crash.dump

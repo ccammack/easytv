@@ -1,0 +1,15 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "mix_task",
+      "name": "Debug EasyTV config",
+      "request": "launch",
+      "task": "easytv",
+      "taskArgs": ["--config", "priv/easytv.config.exs", "/mnt/media"],
+      "projectDir": "${workspaceFolder}",
+      "requireFiles": ["priv/easytv.config.exs"],
+      "startApps": true
+    }
+  ]
+}

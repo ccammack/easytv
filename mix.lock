@@ -1,0 +1,5 @@
+%{
+  "elixir_make": {:hex, :elixir_make, "0.10.1", "f5a44ab6b48421de1c4fd33c147e22cd2f82fd86e8a9a4d24809d466cad63c5e", [:mix], [], "hexpm", "ce1eaa234bc87f0279718e793fd6f8ad35b4e8ee8d412329e3879eee8d40adba"},
+  "input_event": {:hex, :input_event, "1.4.2", "8ad280387595110cf4ac4d92cfcfd2f5d61f7285084f35adc5feec077df23058", [:make, :mix], [{:elixir_make, "~> 0.6", [hex: :elixir_make, repo: "hexpm", optional: false]}], "hexpm", "eb12e3a5d83f2c570d965ad0a5de7bea7c9f387b425ae882c00f3a2a00971e3f"},
+  "jason": {:hex, :jason, "1.4.5", "2e3a008590b0b8d7388c20293e9dcc9cf3e5d642fd2a114e4cbbb52e595d940a", [:mix], [{:decimal, "~> 1.0 or ~> 2.0 or ~> 3.0", [hex: :decimal, repo: "hexpm", optional: true]}], "hexpm", "b0c823996102bcd0239b3c2444eb00409b72f6a140c1950bc8b457d836b30684"},
+}

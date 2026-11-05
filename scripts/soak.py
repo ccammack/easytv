@@ -1,319 +1,339 @@
 #!/usr/bin/env python3
-"""Bounded player and appliance soak runners; standard library only."""
+"""Exercise the installed EasyTV service through its existing evdev input."""
 
 import argparse
-import contextlib
 import datetime
+import fcntl
+import glob
 import json
+import math
 import os
-import pwd
 from pathlib import Path
-import shutil
+import pwd
+import random
+import re
 import signal
+import stat
+import struct
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
-import wave
-import math
 
 
-ROOT = Path(__file__).resolve().parent.parent
+EVENT = struct.Struct("@llHHi")
+PAGEUP, PAGEDOWN = 104, 109
+STOPPING = False
 
 
-def duration(text):
-    units = {"s": 1, "m": 60, "h": 3600}
+def duration(value):
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)([smhd]?)", value)
+    if not match:
+        raise argparse.ArgumentTypeError("use a positive duration such as 30s, 10m, 8h, or 2d")
+    seconds = float(match[1]) * {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}[match[2]]
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError("duration must be finite and positive")
+    return seconds
+
+
+def command(*args):
+    result = subprocess.run(args, capture_output=True, text=True, timeout=15)
+    if result.returncode:
+        raise RuntimeError(f"{' '.join(args)} failed: {result.stderr.strip()}")
+    return result.stdout
+
+
+def service_state():
+    output = command(
+        "systemctl", "show", "easytv.service",
+        "--property=ActiveState,SubState,InvocationID,NRestarts",
+    )
+    return dict(line.split("=", 1) for line in output.splitlines())
+
+
+def processes(uid):
+    result = []
+    for directory in Path("/proc").iterdir():
+        if not directory.name.isdigit():
+            continue
+        try:
+            if directory.stat().st_uid != uid:
+                continue
+            name = (directory / "comm").read_text().strip()
+            args = (directory / "cmdline").read_bytes().split(b"\0")
+            status = (directory / "status").read_text()
+            process_stat = (directory / "stat").read_text().rsplit(")", 1)[1].split()
+            if process_stat[0] == "Z":
+                continue
+            # Field 22 is starttime; the split begins at field 3.
+            start = process_stat[19]
+            rss = re.search(r"^VmRSS:\s+(\d+)", status, re.MULTILINE)
+            result.append({
+                "pid": int(directory.name), "name": name, "start": start,
+                "args": [os.fsdecode(arg) for arg in args if arg],
+                "rss_kib": int(rss[1]) if rss else 0,
+                "threads": len(list((directory / "task").iterdir())),
+                "fds": len(list((directory / "fd").iterdir())),
+            })
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+    return result
+
+
+def request_mute(url, destination):
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "http" or parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
+        raise RuntimeError("--cec-url must be a local HTTP daemon URL")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in ("", "/"):
+        raise RuntimeError("--cec-url must be a base URL without credentials, path, query, or fragment")
+    body = json.dumps({
+        "command": "remote_key", "destination": destination, "control": "MUTE_FUNCTION",
+    }).encode()
+    request = urllib.request.Request(
+        url.rstrip("/") + "/commands", body, {"Content-Type": "application/json"},
+    )
+    # No retry: even a failed/uncertain request may have reached the TV.
     try:
-        value = float(text[:-1]) * units[text[-1]] if text[-1] in units else float(text)
-        if not math.isfinite(value) or not 0 < value <= 7 * 86400:
-            raise ValueError()
-        return value
-    except (ValueError, KeyError, IndexError):
-        raise argparse.ArgumentTypeError("use a positive duration up to 7d, e.g. 30s, 10m, 8h")
-
-
-def request(base, path, body=None):
-    data = None if body is None else json.dumps(body).encode()
-    req = urllib.request.Request(base + path, data=data,
-                                 headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=8) as response:
-        if body is not None:
+        with urllib.request.urlopen(request, timeout=10) as response:
             if response.status != 204:
-                raise RuntimeError(f"{path}: expected 204, got {response.status}")
-            return None
-        if response.status != 200:
-            raise RuntimeError(f"{path}: expected 200, got {response.status}")
-        return json.load(response)
+                raise RuntimeError(f"mute returned HTTP {response.status}")
+    except urllib.error.HTTPError as error:
+        detail = error.read(2048).decode(errors="replace")
+        raise RuntimeError(f"mute returned HTTP {error.code}: {detail}; not retrying") from error
 
 
-def status(base):
-    value = request(base, "/status")
-    required = {"channel_id", "file_path", "playback", "position_seconds",
-                "pending_channel_id", "last_error", "next_retry_at"}
-    if not isinstance(value, dict) or set(value) != required:
-        raise RuntimeError(f"unexpected status shape: {value!r}")
-    if value["playback"] not in ("playing", "stopped", "retrying"):
-        raise RuntimeError(f"unexpected playback state: {value!r}")
-    return value
+class Soak:
+    def __init__(self, args, report):
+        self.args = args
+        self.report = report
+        self.random = random.Random(args.seed)
+        self.uid = pwd.getpwnam("easytv").pw_uid
+        self.baseline = service_state()
+        self.vm = None
+        self.cursor = None
+        self.sent = 0
+        self.received = 0
+        self.pending_since = None
+        self.missing_player_since = None
+        self.next_check = 0
+        self.started = time.monotonic()
+        self.deadline = self.started + args.duration
+        self.fd = None
+
+    def log(self, event, **fields):
+        record = {
+            "time": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "elapsed_s": round(time.monotonic() - self.started, 2),
+            "event": event, **fields,
+        }
+        self.report.write(json.dumps(record) + "\n")
+        self.report.flush()
+        if event != "health":
+            print(json.dumps(record), flush=True)
+
+    def prepare(self):
+        if self.baseline["ActiveState"] != "active" or self.baseline["SubState"] != "running":
+            raise RuntimeError("easytv.service must already be running")
+        device = self.args.device
+        if device is None:
+            matches = glob.glob("/dev/input/by-id/usb-flirc.tv_*-event-kbd")
+            if len(matches) != 1:
+                raise RuntimeError("expected exactly one FLIRC keyboard; specify --device explicitly")
+            device = matches[0]
+        device = Path(device).resolve(strict=True)
+        if device.parent != Path("/dev/input") or not re.fullmatch(r"event\d+", device.name):
+            raise RuntimeError("--device must resolve to /dev/input/eventN")
+        if not stat.S_ISCHR(device.stat().st_mode):
+            raise RuntimeError("--device is not an input character device")
+        running = processes(self.uid)
+        readers = [p for p in running if p["name"] == "input_event"]
+        if not any(
+            len(p["args"]) >= 2 and Path(p["args"][1]).resolve() == device for p in readers
+        ):
+            raise RuntimeError("EasyTV is not reading this device; check permissions and startup discovery")
+        self.fd = os.open(device, os.O_WRONLY | os.O_NONBLOCK)
+        # EVIOCGKEY: refuse to interfere with a physically held channel key.
+        bitmap = bytearray(96)
+        fcntl.ioctl(self.fd, (2 << 30) | (len(bitmap) << 16) | (ord("E") << 8) | 0x18, bitmap)
+        if any(bitmap[key // 8] & (1 << (key % 8)) for key in (PAGEUP, PAGEDOWN)):
+            raise RuntimeError("release physical PageUp/PageDown keys before starting")
+        entries = command(
+            "journalctl", f"_UID={self.uid}", "-n", "1", "--output=json", "--no-pager",
+        ).splitlines()
+        if not entries:
+            raise RuntimeError("no service-user journal cursor available")
+        self.cursor = json.loads(entries[-1])["__CURSOR"]
+        self.log("start", device=str(device), seed=self.args.seed,
+                 duration_s=self.args.duration, baseline=self.baseline)
+        self.health()
+        if not self.args.skip_mute:
+            request_mute(self.args.cec_url, self.args.mute_destination)
+            self.log("mute_requested", destination=self.args.mute_destination,
+                     note="transmission accepted; verify TV actually muted; no restore or retry")
+
+    def journal(self):
+        output = command(
+            "journalctl", f"_UID={self.uid}", f"--after-cursor={self.cursor}",
+            "--output=json", "--no-pager",
+        )
+        for line in output.splitlines():
+            entry = json.loads(line)
+            self.cursor = entry["__CURSOR"]
+            message = entry.get("MESSAGE", "")
+            if re.fullmatch(
+                r"(?:\[info\] )?(?:Next channel|Previous channel|Return to current channel)", message
+            ):
+                self.received += 1
+            priority = int(entry.get("PRIORITY", 6))
+            level = re.match(r"^\[(error|warning|critical|alert|emergency)\]", message)
+            if level:
+                priority = min(priority, {"error": 3, "warning": 4, "critical": 2,
+                                          "alert": 1, "emergency": 0}[level[1]])
+            if priority <= 4:
+                self.log("journal", priority=priority, message=message)
+                # AS bursts can legitimately hit cecmond's admission rate limit.
+                rate_limit = "CEC Active Source failed:" in message and "429" in message
+                if level and priority <= 3 and not rate_limit:
+                    raise RuntimeError(f"EasyTV logged an error: {message}")
+        if self.received >= self.sent:
+            self.pending_since = None
+
+    def health(self):
+        state = service_state()
+        if state != self.baseline:
+            raise RuntimeError(f"service stopped or restarted: baseline={self.baseline}, now={state}")
+        running = processes(self.uid)
+        vms = [p for p in running if p["name"] == "beam.smp"]
+        if len(vms) != 1:
+            raise RuntimeError(f"expected one EasyTV VM, found {len(vms)}")
+        identity = (vms[0]["pid"], vms[0]["start"])
+        if self.vm is not None and identity != self.vm:
+            raise RuntimeError(f"playback VM changed from {self.vm} to {identity}")
+        self.vm = identity
+        self.journal()
+        now = time.monotonic()
+        if self.pending_since is not None and now - self.pending_since > 15:
+            raise RuntimeError(f"keys are not reaching sample config: sent={self.sent}, received={self.received}")
+        players = [p for p in running if p["name"] == "mpv"]
+        if players:
+            self.missing_player_since = None
+        elif self.missing_player_since is None:
+            self.missing_player_since = now
+        elif now - self.missing_player_since > 20:
+            raise RuntimeError("no mpv for over 20 seconds; playback may have stalled or TV focus was lost")
+        vm_metrics = {key: value for key, value in vms[0].items() if key != "args"}
+        self.log("health", vm=vm_metrics, mpv_count=len(players),
+                 osd_count=sum(p["name"] == "aosd_cat" for p in running),
+                 sent=self.sent, received=self.received)
+        self.next_check = now + 5
+
+    def wait(self, seconds):
+        end = min(time.monotonic() + seconds, self.deadline)
+        while not STOPPING and time.monotonic() < end:
+            if time.monotonic() >= self.next_check:
+                self.health()
+            time.sleep(min(0.1, max(0, end - time.monotonic())))
+
+    def event(self, event_type, code, value):
+        packet = EVENT.pack(0, 0, event_type, code, value) + EVENT.pack(0, 0, 0, 0, 0)
+        if os.write(self.fd, packet) != len(packet):
+            raise RuntimeError("short input-event write")
+
+    def key(self, code, hold=0.03, repeats=0):
+        self.event(1, code, 1)
+        self.sent += 1
+        if self.pending_since is None:
+            self.pending_since = time.monotonic()
+        try:
+            for _ in range(repeats):
+                self.wait(0.08)
+                if STOPPING or time.monotonic() >= self.deadline:
+                    break
+                self.event(1, code, 2)
+            self.wait(hold)
+        finally:
+            self.event(1, code, 0)
+
+    def run(self):
+        cycle = 0
+        while not STOPPING and time.monotonic() < self.deadline:
+            cycle += 1
+            self.log("phase", phase="steady", cycle=cycle, seconds=self.args.steady)
+            self.wait(self.args.steady)
+            if STOPPING or time.monotonic() >= self.deadline:
+                break
+            self.log("phase", phase="changing", cycle=cycle, seconds=self.args.changing)
+            end = min(time.monotonic() + self.args.changing, self.deadline)
+            while not STOPPING and time.monotonic() < end:
+                mode = self.random.choice(("burst", "alternate", "hold", "slow"))
+                code = self.random.choice((PAGEUP, PAGEDOWN))
+                count = self.random.randint(1, 16) if mode in ("burst", "alternate") else 1
+                self.log("keys", mode=mode, count=count, key=code)
+                for index in range(count):
+                    if STOPPING or time.monotonic() >= end:
+                        break
+                    key = (PAGEUP if index % 2 else PAGEDOWN) if mode == "alternate" else code
+                    self.key(key, repeats=8 if mode == "hold" else 0)
+                    self.wait(self.random.uniform(0.02, 0.2) if mode != "slow" else 2.05)
+                self.wait(self.random.choice((0.05, 0.3, 1.9, 2.05, 3, 8)))
+            self.wait(4)
+        if not STOPPING:
+            # Check outstanding key delivery even when duration ended during a burst.
+            self.deadline = time.monotonic() + 16
+            self.wait(5)
+            self.health()
+            if self.received < self.sent:
+                raise RuntimeError(f"undelivered keys at finish: sent={self.sent}, received={self.received}")
+        self.log("interrupted" if STOPPING else "pass", sent=self.sent, received=self.received)
 
 
-def wait_status(base, predicate, process, timeout=15):
-    deadline = time.monotonic() + timeout
-    while True:
-        if process.poll() is not None:
-            raise RuntimeError(f"isolated player exited with {process.returncode}")
-        value = status(base)
-        if predicate(value):
-            return value
-        if time.monotonic() >= deadline:
-            raise RuntimeError(f"status deadline exceeded: {value!r}")
-        time.sleep(0.1)
-
-
-def run(command, **kwargs):
-    process = subprocess.Popen(command, start_new_session=True, **kwargs)
-    try:
-        code = process.wait(timeout=60)
-        if code:
-            raise subprocess.CalledProcessError(code, command)
-    finally:
-        if process.poll() is None:
-            os.killpg(process.pid, signal.SIGTERM)
-            try:
-                process.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait(timeout=5)
-
-
-def fixtures(root):
-    for channel in ("Channel One", "Channel Two"):
-        folder = root / channel
-        folder.mkdir(parents=True)
-        with wave.open(str(folder / "01.wav"), "wb") as stream:
-            stream.setnchannels(1)
-            stream.setsampwidth(2)
-            stream.setframerate(8000)
-            stream.writeframes(bytes(8000 * 2 * 2))
-        run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i",
-             "color=c=blue:s=160x90:r=10", "-t", "2", "-c:v", "mpeg4",
-             str(folder / "02.mp4")])
-        (folder / "03.ppm").write_bytes(b"P6\n16 16\n255\n" + bytes([0, 128, 0]) * 256)
-        (folder / "04.mp4").write_bytes(b"deliberately invalid media\n")
-
-
-def resources(pid):
-    proc = Path("/proc") / str(pid)
-    values = {}
-    for line in (proc / "status").read_text().splitlines():
-        if line.startswith("VmRSS:"):
-            values["rss_kib"] = int(line.split()[1])
-    values["fds"] = len(list((proc / "fd").iterdir()))
-    values["children"] = (proc / "task" / str(pid) / "children").read_text().split()
-    return values
-
-
-def service_snapshot(service):
-    result = subprocess.run(
-        ["systemctl", "show", service, "--property=NRestarts,ActiveState,MainPID"],
-        capture_output=True, text=True, timeout=10, check=True)
-    return dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+def stop(_signal, _frame):
+    global STOPPING
+    STOPPING = True
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["player", "appliance"])
-    parser.add_argument("--duration", type=duration, default=3600,
-                        help="soak duration, default 1h; setup/scenarios/cleanup add time")
-    parser.add_argument("--interval", type=duration, default=45,
-                        help="normal channel dwell, default 45s (alternates 1x/2x)")
-    parser.add_argument("--url", default="http://127.0.0.1:8080",
-                        help="appliance only: running service; changes real channels")
-    parser.add_argument("--service", default="easytv.service",
-                        help="appliance only: local systemd unit to monitor")
-    parser.add_argument("--binary", type=Path, default=ROOT / "bin/easytv")
-    parser.add_argument("--go", default=os.environ.get("GO", "go"),
-                        help="player only: Go executable for focused integration scenarios")
-    parser.add_argument("--output", type=Path,
-                        help="new report directory; defaults to a private directory in /tmp")
+    parser.add_argument("--duration", type=duration, default=duration("24h"), help="e.g. 30m, 8h, 2d (default 24h)")
+    parser.add_argument("--steady", type=duration, default=duration("30m"), help="steady phase length (default 30m)")
+    parser.add_argument("--changing", type=duration, default=duration("10m"), help="changing phase length (default 10m)")
+    parser.add_argument("--device", help="existing input device; defaults to the single FLIRC keyboard")
+    parser.add_argument("--cec-url", default="http://127.0.0.1:8080")
+    parser.add_argument("--mute-destination", type=int, choices=range(15), default=0, metavar="0-14")
+    parser.add_argument("--skip-mute", action="store_true")
+    parser.add_argument("--seed", type=int, default=random.SystemRandom().randrange(2**32))
+    parser.add_argument("--report", type=Path, help="new JSONL report path (default .easytv/soak-TIMESTAMP.jsonl)")
     args = parser.parse_args()
-    output = args.output
-    if output is None:
-        output = Path(tempfile.mkdtemp(prefix="easytv-soak-report-"))
-    else:
-        output.mkdir(mode=0o700, parents=True, exist_ok=False)
-    output = output.resolve()
-    print(f"Mode={args.mode} duration={args.duration}s report={output}", flush=True)
-    print("Appliance mode changes channels and may select the Pi's HDMI input."
-          if args.mode == "appliance" else "Isolated fixtures; no installed service or CEC access.",
-          flush=True)
-    actions = 0
-    samples = 0
-    process = None
-    result = {"result": "FAIL", "mode": args.mode, "started_at": datetime.datetime.now(
-        datetime.timezone.utc).isoformat()}
-    started = time.monotonic()
-    baseline = None
-    initial_service = None
-    base = args.url.rstrip("/")
-
-    def record(event, **fields):
-        with (output / "events.jsonl").open("a") as log:
-            log.write(json.dumps({"elapsed": round(time.monotonic() - started, 3),
-                                  "event": event, **fields}) + "\n")
-
-    def interrupted(signum, frame):
-        raise KeyboardInterrupt()
-
-    signal.signal(signal.SIGTERM, interrupted)
+    if os.geteuid() != 0:
+        parser.error("run with sudo; injecting evdev events requires root")
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGTERM, stop)
+    report_path = args.report or Path(".easytv") / (
+        "soak-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + ".jsonl"
+    )
+    soak = None
     try:
-        with contextlib.ExitStack() as stack:
-            if args.mode == "player":
-                for executable in ("mpv", "ffmpeg", "vipsheader", "vipsthumbnail"):
-                    if shutil.which(executable) is None:
-                        raise RuntimeError(f"missing prerequisite: {executable}")
-                if not args.binary.is_file():
-                    raise RuntimeError("build bin/easytv first with make build")
-                with (output / "scenarios.log").open("w") as scenario_log:
-                    environment = dict(os.environ, EASYTV_TEST_REAL_MPV="1",
-                                       GOTOOLCHAIN="local", GOPROXY="off",
-                                       GOSUMDB="off", GOWORK="off")
-                    run([args.go, "test", "-mod=readonly", "-count=1", "-timeout=50s",
-                         "-run", "TestReal(MediaRecovery|MissingMedia|CECService|HTTPRescan|Rescan)",
-                         "./internal/app"], cwd=ROOT, env=environment,
-                        stdout=scenario_log, stderr=subprocess.STDOUT)
-                record("focused-recovery-rescan-mock-cec-scenarios-passed")
-                work = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="easytv-soak-")))
-                media = work / "media"
-                fixtures(media)
-                log = stack.enter_context((output / "player.log").open("w"))
-                process = subprocess.Popen(
-                    [str(args.binary.resolve()), "--headless", "--scan",
-                     "--state-dir", str(work / "state"), "--temp-dir", str(work / "temp"),
-                     "--listen", "127.0.0.1:0", str(media)],
-                    stdout=log, stderr=log)
-                # Ensure process shutdown precedes workspace removal, even on failure.
-                def stop():
-                    if process.poll() is None:
-                        process.terminate()
-                        try:
-                            process.wait(timeout=20)
-                        except subprocess.TimeoutExpired:
-                            process.kill()
-                            process.wait(timeout=5)
-                            raise RuntimeError("isolated shutdown exceeded 20 seconds")
-                    if process.returncode != 0:
-                        raise RuntimeError(f"isolated exit={process.returncode}; see player.log")
-                stack.callback(stop)
-                deadline = time.monotonic() + 30
-                while True:
-                    lines = (output / "player.log").read_text().splitlines()
-                    address = next((line.split("HTTP listening=", 1)[1].split()[0]
-                                    for line in lines if "HTTP listening=" in line), None)
-                    if address:
-                        base = "http://" + address
-                        break
-                    if process.poll() is not None or time.monotonic() > deadline:
-                        raise RuntimeError("isolated startup failed; see player.log")
-                    time.sleep(0.1)
-                # Exercise normal startup fallback with a missing saved file.
-                current = status(base)
-                target = Path(current["file_path"])
-                request(base, "/channel", {"direction": "next"})
-                wait_status(base, lambda s: s["channel_id"] != current["channel_id"], process)
-                backup = target.with_suffix(target.suffix + ".offline")
-                target.rename(backup)
-                request(base, "/channel", {"direction": "previous"})
-                # Other candidates may play normally; exact-file retry behavior is
-                # covered by the focused Go recovery tests, not inferred here.
-                wait_status(base, lambda s: s["channel_id"] == current["channel_id"], process)
-                backup.rename(target)
-                request(base, "/rescan", {})
-                record("missing-file-and-rescan-completed")
-            else:
-                initial_service = service_snapshot(args.service)
-                if initial_service.get("ActiveState") != "active":
-                    raise RuntimeError(f"service not active: {initial_service}")
-            print(f"Target={base}", flush=True)
-            initial_error = status(base)["last_error"]
-            deadline = time.monotonic() + args.duration
-            next_action = time.monotonic()
-            last_file = None
-            files_seen = set()
-            pending_since = None
-            while time.monotonic() < deadline:
-                value = status(base)
-                samples += 1
-                files_seen.add(value["file_path"])
-                sample = {"status": value}
-                if process is not None:
-                    if process.poll() is not None:
-                        raise RuntimeError(f"player exited: {process.returncode}")
-                    sample["resources"] = resources(process.pid)
-                    temp_count = sum(1 for _ in (work / "temp").rglob("*"))
-                    sample["temp_entries"] = temp_count
-                    if baseline is None and samples >= 3:
-                        baseline = sample["resources"]
-                    if baseline:
-                        r = sample["resources"]
-                        if r["fds"] > baseline["fds"] + 32 or r["rss_kib"] > baseline["rss_kib"] + 131072:
-                            raise RuntimeError(f"resource growth exceeded allowance: {r}")
-                    if len(sample["resources"]["children"]) > 4 or temp_count > 100:
-                        raise RuntimeError(f"process/temp growth exceeded allowance: {sample}")
-                else:
-                    observed = service_snapshot(args.service)
-                    sample["service"] = observed
-                    if observed != initial_service:
-                        raise RuntimeError(f"service changed/restarted: {observed}")
-                record("sample", **sample)
-                if value["pending_channel_id"]:
-                    if pending_since is None:
-                        pending_since = time.monotonic()
-                    elif time.monotonic() - pending_since > 15:
-                        raise RuntimeError(f"channel preview did not commit: {value}")
-                else:
-                    pending_since = None
-                if value["playback"] != "playing":
-                    raise RuntimeError(f"unexpected non-playing state: {value}")
-                if args.mode == "appliance" and value["last_error"] != initial_error:
-                    raise RuntimeError(f"new playback error: {value['last_error']}")
-                if value["file_path"] != last_file:
-                    record("file-observed", path=value["file_path"])
-                    last_file = value["file_path"]
-                if time.monotonic() >= next_action:
-                    direction = "previous" if actions % 3 == 2 else "next"
-                    burst = 4 if actions % 6 == 5 else 1
-                    for _ in range(burst):
-                        request(base, "/channel", {"direction": direction})
-                        record("channel", direction=direction)
-                        time.sleep(0.25)
-                    actions += 1
-                    dwell = 600 if actions % 10 == 0 else args.interval * (1 + actions % 2)
-                    next_action = time.monotonic() + dwell
-                time.sleep(min(2, max(0, deadline - time.monotonic())))
-            result.update(result="PASS", unique_files_observed=len(files_seen))
-    except KeyboardInterrupt:
-        result.update(result="INTERRUPTED", error="interrupted by user or signal")
-    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError,
-            urllib.error.URLError) as exc:
-        result.update(result="FAIL", error=str(exc))
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        with open("/run/lock/easytv-deploy.lock", "a") as lock, report_path.open("x") as report:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            soak = Soak(args, report)
+            try:
+                soak.prepare()
+                soak.run()
+                return 130 if STOPPING else 0
+            except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
+                soak.log("fail", error=str(error))
+                return 1
+            finally:
+                if soak.fd is not None:
+                    os.close(soak.fd)
+    except (OSError, KeyError) as error:
+        print(f"soak failed: {error}", file=sys.stderr)
+        return 1
     finally:
-        if args.mode == "appliance":
-            with (output / "journal.log").open("w") as log:
-                try:
-                    subprocess.run(["journalctl", "-b", "--since", result["started_at"],
-                                    "_UID=" + str(pwd.getpwnam("easytv").pw_uid),
-                                    "--no-pager", "-n", "2000"], stdout=log,
-                                   stderr=subprocess.STDOUT, timeout=15, check=True)
-                except (KeyError, OSError, subprocess.SubprocessError) as exc:
-                    result["journal_warning"] = str(exc)
-        result.update(actions=actions, samples=samples,
-                      elapsed_seconds=round(time.monotonic() - started, 3))
-        (output / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
-        print(json.dumps(result, indent=2), flush=True)
-    return 0 if result["result"] == "PASS" else 130 if result["result"] == "INTERRUPTED" else 1
+        print(f"Report: {report_path.resolve()}", flush=True)
 
 
 if __name__ == "__main__":

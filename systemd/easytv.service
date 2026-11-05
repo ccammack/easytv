@@ -1,11 +1,9 @@
 [Unit]
 Description=EasyTV fullscreen appliance
-Wants=easytv-remote.service
 Requires=systemd-logind.service
 After=systemd-logind.service systemd-user-sessions.service getty@tty1.service
 Conflicts=getty@tty1.service
 RequiresMountsFor=/mnt/media
-StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -15,7 +13,8 @@ SupplementaryGroups=video render audio
 PAMName=login
 Environment=HOME=/var/lib/easytv
 Environment=XDG_SESSION_TYPE=x11 XDG_SESSION_CLASS=user XDG_SEAT=seat0 XDG_VTNR=1
-Environment=XAUTHORITY=/run/easytv/Xauthority TMPDIR=/run/easytv
+Environment=XAUTHORITY=/run/easytv/Xauthority
+Environment=EASYTV_PID_FILE=/run/easytv/playback.pid
 StateDirectory=easytv
 StateDirectoryMode=0700
 RuntimeDirectory=easytv
@@ -31,16 +30,16 @@ TTYVHangup=yes
 TTYVTDisallocate=yes
 UtmpIdentifier=tty1
 UtmpMode=user
-ExecStart=/usr/bin/startx /usr/local/bin/easytv \
-    --cec-device=/dev/cec0 \
-    --state-dir=/var/lib/easytv \
-    --temp-dir=/run/easytv \
-    --listen=127.0.0.1:8080 \
-    --osd --scan /mnt/media \
+ExecStart=/usr/bin/startx /opt/easytv/bin/play \
+    --config /etc/easytv/config.exs \
+    --state-dir /var/lib/easytv --temp-dir /run/easytv \
+    --cec-url http://127.0.0.1:8080 --scan /mnt/media \
     -- /usr/bin/Xorg :0 vt1 -keeptty -nolisten tcp -s 0 -dpms
-Restart=always
+Restart=on-failure
+ExecStop=/opt/easytv/bin/stop-playback
 RestartSec=5s
 TimeoutStopSec=20s
+KillSignal=SIGTERM
 KillMode=control-group
 
 [Install]
