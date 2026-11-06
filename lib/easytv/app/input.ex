@@ -161,11 +161,7 @@ defmodule App.Input do
         "reason=#{inspect(reason)}"
     )
 
-    state =
-      case state.preview_session do
-        nil -> state
-        session -> %{state | preview_session: %{session | switching?: false}}
-      end
+    state = put_in(state.preview_session.switching?, false)
 
     {:noreply, state}
   end

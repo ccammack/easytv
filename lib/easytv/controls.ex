@@ -2,10 +2,11 @@ defmodule EasyTV.Controls do
   require Logger
 
   @moduledoc """
-  Direct, asynchronous application actions.
+  Application actions, command forwarding, and current-media queries.
 
   `:ok` means the action was sent, not that playback has completed it.
   Command senders return `{:ok, ref}` on dispatch or `{:error, reason}`.
+  `current_media/0` synchronously returns a snapshot of the active item.
   """
 
   def channel_next, do: dispatch(:channel_next)
@@ -14,6 +15,17 @@ defmodule EasyTV.Controls do
   def resume, do: dispatch(:resume)
   def send_cec_command(command), do: EasyTV.Cecmond.send_command(command)
   def cec_enabled?, do: Process.whereis(EasyTV.Cecmond) != nil
+
+  def current_media do
+    case Process.whereis(App.PlaybackOwner) do
+      nil ->
+        Logger.error("current media query failed: playback owner is not running")
+        {:error, :not_running}
+
+      pid ->
+        GenServer.call(pid, :current_media)
+    end
+  end
 
   def send_mpv_command([name | _] = command) when is_binary(name) do
     with {:ok, _json} <- Jason.encode(command) do

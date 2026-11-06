@@ -48,6 +48,18 @@ defmodule App.PlaybackOwner do
   end
 
   @impl true
+  def handle_call(:current_media, _from, %{current_player: nil} = state) do
+    Logger.warning("current media query failed: no active player")
+    {:reply, {:error, :no_player}, state}
+  end
+
+  def handle_call(:current_media, _from, state) do
+    path = App.Util.current_original_path(state)
+    media = %{path: path, kind: MediaTypes.kind(path), playback_id: state.current_player}
+    {:reply, {:ok, media}, state}
+  end
+
+  @impl true
   def handle_cast({:mpv_command, ref, command}, %{current_player: nil} = state) do
     report_mpv_result(ref, command, {:error, :no_player})
     {:noreply, state}

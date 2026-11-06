@@ -92,4 +92,15 @@ defmodule MediaTypes do
 
   def image_extensions, do: @image_extensions
   def media_extensions, do: @media_extensions
+
+  def kind(path) do
+    extension = path |> Path.extname() |> String.downcase()
+
+    cond do
+      MapSet.member?(@image_extensions, extension) -> :image
+      MapSet.member?(@audio_extensions, extension) -> :audio
+      MapSet.member?(@video_extensions, extension) -> :video
+      true -> raise ArgumentError, "unsupported media extension: #{inspect(path)}"
+    end
+  end
 end
