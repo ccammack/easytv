@@ -39,23 +39,27 @@ not been tested.
 
 ## Optional HDMI-CEC control
 
-By default, easytv plays continuously, even while the TV is off. This
-works well when the Raspberry Pi is the TV's only connected device:
-select the Pi's HDMI input, use FLIRC for channel changes, and control
-TV power and volume directly with the remote.
+HDMI-CEC is optional. Without it, easytv plays continuously, even while
+the TV is off. This works well when the Raspberry Pi is the TV's only
+connected device: FLIRC handles channel changes, and the remote controls
+TV power and volume directly.
 
-To coordinate playback with TV standby and input changes, easytv relies
-on a separate project, [cecmond](https://github.com/ccammack/cecmond).
-Run it alongside easytv and connect using `--cec-url`. The supplied
-service unit already includes this option.
+For TV-aware playback, easytv relies on
+[cecmond](https://github.com/ccammack/cecmond), installed and running on
+the Pi. Its setup instructions cover enabling CEC on the TV and checking
+communication before connecting easytv.
 
-With this connection, easytv can stop playback when the TV enters
-standby or another device becomes active, resume when the TV selects
-the Pi, and request the Pi's HDMI input when a channel button is pressed.
+The supplied easytv service already includes `--cec-url` to connect to
+cecmond. A different cecmond address or port requires a matching change
+to this option.
+
+With CEC connected, easytv can stop playback when the TV enters standby
+or another device becomes active, resume when the TV selects the Pi,
+and request the Pi's HDMI input when a channel button is pressed.
 This is especially useful when other HDMI devices share the TV.
 
-These actions depend on HDMI-CEC support and behavior from the TV and
-other connected equipment.
+CEC behavior varies by TV and connected equipment. These actions are
+not guaranteed; basic playback and FLIRC channel control do not require CEC.
 
 ## Build and install over SSH
 
@@ -302,6 +306,45 @@ roots* each time it starts.
 sudo systemctl restart easytv.service
 ```
 
+## Troubleshooting
+
+- **No picture:** Confirm that the TV has the Pi's HDMI input selected.
+  Check service status with the command below. The configured display
+  mode must also be supported by the TV.
+- **Picture but no sound:** Confirm that the TV is not muted and that
+  HDMI audio is configured for the port connected to the TV.
+- **No channels or missing media:** Media must be inside channel
+  subdirectories, readable by the `easytv` account, and have recognized
+  file extensions. Restart easytv after adding or removing files.
+- **Channel buttons do nothing:** Test with PgUp and PgDown on a USB
+  keyboard. If those work, check FLIRC's button mappings. Input devices
+  must be connected before easytv starts; restart the service after
+  attaching another device.
+- **Network media is unavailable:** Repeat the checks in
+  [Mount SMB share as a media root](#mount-smb-share-as-a-media-root).
+  Confirm that `/mnt/media` points to the intended share and can be
+  read by the `easytv` account.
+- **TV power or input changes do not affect playback:** Confirm that
+  cecmond is running and follow its
+  [CEC testing instructions](https://github.com/ccammack/cecmond).
+  CEC behavior varies by equipment.
+
+Check whether the service is running:
+
+```sh
+systemctl status easytv.service --no-pager
+```
+
+Inspect recent application logs:
+
+```sh
+sudo journalctl _UID=$(id -u easytv) -b -n 60 --no-pager
+```
+
+Application logs may belong to the service account's session rather than
+the systemd unit, so `journalctl -u easytv.service` may show only startup
+and shutdown messages.
+
 ## Customizing behavior
 
 ### Configuration script
@@ -401,7 +444,8 @@ sudo python3 scripts/soak.py --duration 2m --steady 15s --changing 30s --skip-mu
 
 ## References
 
-* https://github.com/danya02/babooshka-tv
-* https://github.com/cwilliamsbiz/DadTV
-* https://github.com/shane-mason/FieldStation42
-* https://github.com/ErsatzTV
+* [cecmond](https://github.com/ccammack/cecmond)
+* [babooshka-tv](https://github.com/danya02/babooshka-tv)
+* [DadTV](https://github.com/cwilliamsbiz/DadTV)
+* [FieldStation42](https://github.com/shane-mason/FieldStation42)
+* [ErsatzTV](https://github.com/ErsatzTV)
