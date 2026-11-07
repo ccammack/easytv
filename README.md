@@ -68,7 +68,7 @@ Enable `ssh` when writing the microSD card using the
 [Raspberry Pi Imager](https://www.raspberrypi.com/software/).
 
 Log in as a regular user over `ssh` and install the application 
-from source:
+from source. Resolve any failed command before continuing:
 
 ```sh
 sudo apt update
@@ -246,45 +246,6 @@ sudo systemctl enable easytv.service
 sudo systemctl status easytv.service
 ```
 
-## Configure and update from source
-
-Edit configuration in the checkout:
-
-* `priv/easytv.config.exs` for keyboard mappings and CEC behavior.
-* `systemd/easytv.service` for media paths and startup arguments.
-* `systemd/70-easytv-remote.rules` for keyboard permissions, if needed.
-
-Rebuild and deploy:
-
-```sh
-mix test
-MIX_ENV=prod mix release --overwrite
-bash scripts/install.sh --check
-sudo bash scripts/install.sh
-sudo systemctl start easytv.service
-```
-
-The installer validates the release and config, stops playback, and replaces
-installed files. Playback state is preserved. Installation leaves the service
-stopped and does not change boot enablement.
-
-Edit checkout files rather than installed copies: installation replaces them,
-and integrity checks reject locally modified installed files. If deployment
-fails, leave the service stopped and resolve the reported error before retrying.
-The read-only `--check` does not verify actual playback, display, audio, or input.
-
-## Uninstalling
-
-Uninstall stops/disables easytv, removes the managed release, config, unit,
-input rule, and manifest, and restores the tty1 console login. Media, saved
-state, the service account, prerequisite packages, and cecmond are retained.
-The source checkout is not removed.
-
-```sh
-bash scripts/uninstall.sh --check
-sudo bash scripts/uninstall.sh
-```
-
 ## Configure EZclicker remote
 
 Follow manufacturer instructions to configure the remote to control the
@@ -335,17 +296,72 @@ Check whether the service is running:
 systemctl status easytv.service --no-pager
 ```
 
-Inspect recent application logs:
+### Logging
+
+The installed service writes logs to the system journal. Inspect recent
+application logs from the current boot:
 
 ```sh
 sudo journalctl _UID=$(id -u easytv) -b -n 60 --no-pager
+```
+
+Follow new messages; press Ctrl-C to stop watching without stopping playback:
+
+```sh
+sudo journalctl _UID=$(id -u easytv) -f
 ```
 
 Application logs may belong to the service account's session rather than
 the systemd unit, so `journalctl -u easytv.service` may show only startup
 and shutdown messages.
 
-## Customizing behavior
+Production releases log informational messages, warnings, and errors.
+For more detail, see [Debug logging](#debug-logging).
+
+## Configure and update from source
+
+Edit configuration in the checkout:
+
+* `priv/easytv.config.exs` for keyboard mappings and CEC behavior.
+* `systemd/easytv.service` for media paths and startup arguments.
+* `systemd/70-easytv-remote.rules` for keyboard permissions, if needed.
+
+Rebuild and deploy. Resolve any failed command before continuing:
+
+```sh
+mix test
+MIX_ENV=prod mix release --overwrite
+bash scripts/install.sh --check
+sudo bash scripts/install.sh
+sudo systemctl start easytv.service
+```
+
+The installer validates the release and config, stops playback, and replaces
+installed files. Playback state is preserved. Installation leaves the service
+stopped and does not change boot enablement.
+
+Edit checkout files rather than installed copies: installation replaces them,
+and integrity checks reject locally modified installed files. If deployment
+fails, leave the service stopped and resolve the reported error before retrying.
+The read-only `--check` does not verify actual playback, display, audio, or input.
+
+## Uninstalling
+
+Uninstall stops/disables easytv, removes the managed release, config, unit,
+input rule, and manifest, and restores the tty1 console login. Media, saved
+state, the service account, prerequisite packages, and cecmond are retained.
+The source checkout is not removed.
+
+```sh
+bash scripts/uninstall.sh --check
+sudo bash scripts/uninstall.sh
+```
+
+## Advanced customization
+
+The supplied configuration provides the standard playback and remote
+behavior. The sections below describe changes to button actions,
+CEC responses, and playback behavior using Elixir.
 
 ### Configuration script
 
@@ -405,31 +421,24 @@ pending operation.
 CEC transmission results are logged rather than delivered to a script
 callback. Incoming CEC messages arrive separately through `on_cec/2`.
 
-## Logging
+### Debug logging
 
-The installed service writes logs to the system journal. Show recent logs
-from the current boot:
-
-```sh
-sudo journalctl _UID=$(id -u easytv) -b -n 60 --no-pager
-```
-
-Follow new messages; press Ctrl-C to stop watching without stopping playback:
-
-```sh
-sudo journalctl _UID=$(id -u easytv) -f
-```
-
-Application logs may belong to the service account's session rather than
-the systemd unit, so `journalctl -u easytv.service` may show only startup
-and shutdown messages.
-
-Production releases log informational messages, warnings, and errors.
 For detailed diagnostics, add `Logger.configure(level: :debug)` inside
 the user config's `config/0` function, then rebuild and reinstall.
 Remove it and redeploy to restore normal logging.
 
-## Appliance soak test
+## Advanced diagnostics
+
+### Appliance soak test
+
+This optional reliability test automatically changes channels to exercise
+playback over time. It is not required for installation or normal use.
+
+Install Python 3 for the test:
+
+```sh
+sudo apt install -y python3
+```
 
 Run `scripts/soak.py` on the Pi against an already-running installed service.
 It requires Python 3 and root access to inject Linux input events. It writes
