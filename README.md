@@ -72,7 +72,7 @@ from source. Resolve any failed command before continuing:
 
 ```sh
 sudo apt update
-sudo apt install -y git elixir erlang-dev build-essential
+sudo apt install -y git elixir erlang-dev build-essential mpv
 elixir --version # >= Elixir 1.14
 git clone https://github.com/ccammack/easytv.git
 cd easytv
